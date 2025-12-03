@@ -113,7 +113,7 @@ export async function sendMessageWithBusinessLogic(
     }
 
     if (llmResponse?.action === 'complete') {
-        await handleCompletion(conversation, metadata);
+        await handleCompletion(conversation, llmResponse, metadata);
     }
 
     // 5. Populate and return
@@ -181,7 +181,7 @@ async function getLLMResponse(
                 ? "I'm experiencing high demand right now. Please try again in a moment."
                 : "I'm having trouble processing your request. Please try again.",
             action: null,
-            type: null
+            uiHint: null
         };
     }
 }
@@ -205,20 +205,19 @@ async function handleStoreAnswer(
     attachmentIds: string[] | undefined,
     metadata: any
 ): Promise<void> {
-    const { storedQuestionId, value, type } = llmResponse;
+    const { storedQuestionId, value, uiHint } = llmResponse;
 
     if (!storedQuestionId || value === null || value === undefined) {
         return;
     }
 
+    // Get field type from uiHint
+    const fieldType = uiHint?.type || 'text';
     const collectedAnswers = collectAnswers(conversation.messages);
 
     try {
         const { customer, isNew } = await updateOrCreateCustomer(
             conversation._id.toString(),
-            storedQuestionId,
-            value,
-            type,
             collectedAnswers
         );
 
@@ -228,8 +227,8 @@ async function handleStoreAnswer(
             await conversation.save();
         }
 
-        // Handle attachments AFTER LLM response (for upload type groups)
-        if (isUploadField(type, storedQuestionId) && attachmentIds && attachmentIds.length > 0) {
+        // Handle attachments AFTER LLM response (for upload fields)
+        if (isUploadField(fieldType, storedQuestionId) && attachmentIds && attachmentIds.length > 0) {
             await linkAttachments(
                 customer._id.toString(),
                 attachmentIds,
@@ -251,15 +250,35 @@ async function handleStoreAnswer(
         }
     } catch (error: any) {
         logger.error(`Failed to update customer: ${error.message}`);
-        storePendingData(conversation, storedQuestionId, value, type);
+        storePendingData(conversation, storedQuestionId, value, fieldType);
         await conversation.save();
     }
 }
 
 async function handleCompletion(
     conversation: IConversation,
+    llmResponse: any,
     metadata: any
 ): Promise<void> {
+    // Store the final field if present
+    if (llmResponse.storedQuestionId && llmResponse.value !== null && llmResponse.value !== undefined) {
+        const fieldType = llmResponse.uiHint?.type || 'text';
+        const collectedAnswers = collectAnswers(conversation.messages);
+
+        try {
+            const { customer } = await updateOrCreateCustomer(
+                conversation._id.toString(),
+                collectedAnswers
+            );
+
+            if (!conversation.customerId) {
+                conversation.customerId = customer._id;
+            }
+        } catch (error: any) {
+            logger.error(`Failed to store final field on completion: ${error.message}`);
+        }
+    }
+
     // Ensure customer exists
     if (!conversation.customerId) {
         const collectedAnswers = collectAnswers(conversation.messages);
@@ -269,9 +288,6 @@ async function handleCompletion(
             try {
                 const { customer } = await updateOrCreateCustomer(
                     conversation._id.toString(),
-                    'email',
-                    email,
-                    'email',
                     collectedAnswers
                 );
                 conversation.customerId = customer._id;
@@ -289,6 +305,7 @@ async function handleCompletion(
     if (conversation.customerId) {
         try {
             const customerData = await Customer.findById(conversation.customerId)
+                .populate('attachments')
                 .select('-__v')
                 .lean();
 
@@ -321,7 +338,7 @@ function collectAnswers(messages: IMessage[]): Record<string, { value: any; type
             msg.payload.value !== null) {
             answers[msg.payload.storedQuestionId] = {
                 value: msg.payload.value,
-                type: msg.payload.type || 'text'
+                type: msg.payload.uiHint?.type || 'text'
             };
         }
     });
@@ -334,10 +351,10 @@ function findEmailInAnswers(answers: Record<string, { value: any; type: string }
         return answers.email.value;
     }
 
-    // Search in group fields
+    // Search in form groups (type: "form")
     for (const key in answers) {
         const answer = answers[key];
-        if (answer.type === 'group' && answer.value?.email) {
+        if (answer.type === 'form' && answer.value?.email) {
             return answer.value.email;
         }
     }
@@ -347,9 +364,6 @@ function findEmailInAnswers(answers: Record<string, { value: any; type: string }
 
 async function updateOrCreateCustomer(
     conversationId: string,
-    storedQuestionId: string,
-    value: any,
-    type: string,
     allAnswers: Record<string, { value: any; type: string }>
 ): Promise<{ customer: any; isNew: boolean }> {
     // Find email from collected answers
@@ -385,12 +399,11 @@ async function updateOrCreateCustomer(
     }
 
     // Create new customer
-    customer = await createNewCustomer(normalizedEmail, allAnswers, conversationId);
+    customer = await createNewCustomer(allAnswers, conversationId);
     return { customer, isNew: true };
 }
 
 async function createNewCustomer(
-    email: string,
     answers: Record<string, { value: any; type: string }>,
     conversationId: string
 ): Promise<any> {
@@ -432,19 +445,17 @@ function buildProfileUpdates(answers: Record<string, { value: any; type: string 
             return;
         }
 
-        // Store based on type
+        // Store based on type from FORM_JSON
         switch (type) {
             case 'text':
-            case 'phone':
-            case 'email':
             case 'choice':
                 // Simple scalar values
                 profile[questionId] = value;
                 break;
 
-            case 'group':
-                // Nested object - store as-is
-                // For example: address: { address_line: "...", pin_code: "...", address_country: "..." }
+            case 'form':
+                // Form groups - nested object
+                // Example: address: { address_line: "...", pin_code: "...", address_country: "..." }
                 profile[questionId] = value;
                 break;
 
@@ -459,14 +470,14 @@ function buildProfileUpdates(answers: Record<string, { value: any; type: string 
 }
 
 function isUploadField(type: string, questionId: string): boolean {
-    // Check if it's an upload type or matches upload-related patterns
-    return type === 'upload' ||
-        type === 'group' && (
-            questionId.includes('attachment') ||
-            questionId.includes('upload') ||
-            questionId.includes('photo') ||
-            questionId.includes('file')
-        );
+    // Check if it's an upload-related type based on FORM_JSON patterns
+    return type === 'file' ||
+        type === 'files' ||
+        type === 'upload' ||
+        questionId.includes('attachment') ||
+        questionId.includes('upload') ||
+        questionId.includes('photo') ||
+        questionId.includes('file');
 }
 
 function extractAttachmentIdsFromAnswers(answers: Record<string, { value: any; type: string }>): string[] {
@@ -533,6 +544,12 @@ async function linkAttachmentsToCustomer(customerId: string, attachmentIds: stri
 function extractAttachmentIds(value: any): string[] {
     if (!value) return [];
 
+    // Single string ID
+    if (typeof value === 'string') {
+        return [value];
+    }
+
+    // Array of IDs or objects
     if (Array.isArray(value)) {
         return value
             .map((item: any) => {
@@ -544,7 +561,7 @@ function extractAttachmentIds(value: any): string[] {
             .filter(Boolean);
     }
 
-    // Handle nested group objects
+    // Nested object (for form groups with uploads)
     if (typeof value === 'object') {
         const ids: string[] = [];
         Object.values(value).forEach((v: any) => {

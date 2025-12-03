@@ -6,120 +6,120 @@ export const FORM_JSON = {
   "description": "Structured data collection for solar panel installation",
   "flow": [
     {
-      "id": "full_name",
-      "required": true,
-      "type": "text",
       "order": 1,
+      "id": "full_name",
+      "type": "text",
+      "required": true,
+      "presentation": "inline",
+      "placeholder": "e.g., Rajesh Kumar",
       "validation": {
         "minLength": 2,
         "maxLength": 120,
         "pattern": "^[a-zA-Z\\s'-]+$",
-        "errorMessage": "Name should only contain letters, spaces, hyphens, and apostrophes"
       },
       "context": "Used for personalization and official documentation",
-      "uiHint": {
-        "presentation": "inline",
-        "placeholder": "e.g., Rajesh Kumar",
-      }
     },
     {
+      "order": 2,
       "id": "phone",
       "type": "text",
       "required": true,
-      "order": 2,
+      "presentation": "inline",
+      "placeholder": "+91XXXXXXXXXX",
       "validation": {
         "pattern": "^\\+?[0-9]{7,15}$",
-        "errorMessage": "Enter digits with country code (e.g., +91XXXXXXXXXX)"
       },
       "context": "For installation coordination and updates",
-      "uiHint": {
-        "presentation": "inline",
-        "placeholder": "+91XXXXXXXXXX"
-      }
     },
     {
-      "id": "How many solar panels do you want to install?",
+      "order": 3,
+      "id": "number_of_solar_panels",
       "type": "text",
       "required": true,
-      "order": 3,
+      "presentation": "inline",
+      "placeholder": "1, 2, 3, 4, 5, 6, 7, 8, 9, 10",
       "context": "For installation coordination and updates",
-      "uiHint": {
-        "presentation": "inline",
-        "placeholder": "1, 2, 3, 4, 5, 6, 7, 8, 9, 10"
-      }
     },
     {
+      "order": 4,
       "id": "email",
       "type": "text",
       "required": true,
-      "order": 4,
+      "presentation": "inline",
+      "placeholder": "you@example.com",
       "validation": {
         "pattern": "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$",
-        "errorMessage": "Enter a valid email address"
       },
       "context": "For quotes, documentation, and conversation resumption",
-      "uiHint": {
-        "presentation": "inline",
-        "placeholder": "you@example.com",
-      }
     },
     {
-      "id": "address",
-      "type": "group",
-      "required": true,
       "order": 5,
-      "context": "Required for site assessment and installation planning",
+      "id": "address",
+      "type": "form",
+      "presentation": "form_group",
+      "required": true,
+      "placeholder": "e.g., 123 Street, Bangalore, 560001",
       "children": [
         {
           "id": "address_line",
           "type": "text",
+          "placeholder": "Street, city",
           "required": true,
-          "validation": { "minLength": 3, "maxLength": 200 },
-          "uiHint": { "presentation": "inline", "placeholder": "Street, city" }
+          "validation": {
+            "minLength": 3,
+            "maxLength": 500
+          },
         },
         {
           "id": "pin_code",
           "type": "text",
+          "placeholder": "560001",
           "required": true,
           "validation": {
             "pattern": "^[0-9]{5,7}$",
-            "errorMessage": "Enter a valid 5-7 digit PIN code"
           },
-          "uiHint": { "presentation": "inline", "placeholder": "560001" }
+        },
+        {
+          "id": "city",
+          "type": "text",
+          "placeholder": "Bangalore",
+          "required": true,
+          "validation": {
+            "pattern": "^[a-zA-Z\\s'-]+$",
+          },
         },
         {
           "id": "address_country",
           "type": "text",
+          "placeholder": "India",
           "required": false,
-          "validation": { "pattern": "^[a-zA-Z\\s'-]+$" },
-          "uiHint": { "presentation": "inline", "placeholder": "India" }
+          "validation": {
+            "pattern": "^[a-zA-Z\\s'-]+$"
+          },
         }
       ],
-      "uiHint": {
-        "presentation": "form_group",
-        "hint": "We'll collect your complete address in one go",
-        "placeholder": "e.g., 123 Street, Bangalore, 560001"
-      }
+      "context": "Required for site assessment and installation planning",
     },
     {
+      "order": 6,
       "id": "nets_interest",
       "type": "choice",
+      "presentation": "buttons",
       "required": true,
-      "order": 6,
+      "placeholder": "Yes or No",
+      "options": [
+        { "value": "yes", "label": "Yes, I'm interested", "description": "Protects against birds, debris, and weather" },
+        { "value": "no", "label": "No, not needed", "description": "Standard installation without nets" }
+      ],
       "context": "Helps us prepare accurate quote with optional add-ons",
-      "uiHint": {
-        "presentation": "buttons",
-        "options": [
-          { "value": "yes", "label": "Yes, I'm interested", "description": "Protects against birds, debris, and weather" },
-          { "value": "no", "label": "No, not needed", "description": "Standard installation without nets" }
-        ]
-      }
     },
     {
-      "id": "attachments",
-      "type": "group",
-      "required": false,
       "order": 7,
+      "id": "attachments",
+      "type": "files",
+      "presentation": "upload_group",
+      "required": false,
+      "placeholder": "Upload photos of your site, roof, and angles",
       "context": "Optional but highly recommended for precise quotes",
       "children": [
         {
@@ -127,7 +127,7 @@ export const FORM_JSON = {
           "type": "upload",
           "required": false,
           "accept": ["image/*"],
-          "maxFiles": 6,
+          "maxFiles": 3,
           "maxSize": "10MB",
         },
         {
@@ -135,7 +135,7 @@ export const FORM_JSON = {
           "type": "upload",
           "required": false,
           "accept": ["image/*"],
-          "maxFiles": 6,
+          "maxFiles": 3,
           "maxSize": "10MB",
         },
         {
@@ -143,14 +143,22 @@ export const FORM_JSON = {
           "type": "upload",
           "required": false,
           "accept": ["image/*"],
-          "maxFiles": 4,
+          "maxFiles": 3,
           "maxSize": "10MB",
         }
       ],
-      "uiHint": {
-        "presentation": "upload_group",
-        "hint": "Photos help our team provide accurate assessment"
-      }
+    },
+    {
+      "order": 8,
+      "id": "panel_photo",
+      "type": "file",
+      "presentation": "upload",
+      "required": false,
+      "placeholder": "Upload a photo of your solar panel",
+      "accept": ["image/*"],
+      "maxFiles": 1,
+      "maxSize": "10MB",
+      "context": "Optional but highly recommended for precise quotes",
     }
   ],
 
