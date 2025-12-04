@@ -10,7 +10,6 @@ export const FORM_JSON = {
       "id": "full_name",
       "type": "text",
       "required": true,
-      "presentation": "inline",
       "placeholder": "e.g., Rajesh Kumar",
       "validation": {
         "minLength": 2,
@@ -24,7 +23,6 @@ export const FORM_JSON = {
       "id": "phone",
       "type": "text",
       "required": true,
-      "presentation": "inline",
       "placeholder": "+91XXXXXXXXXX",
       "validation": {
         "pattern": "^\\+?[0-9]{7,15}$",
@@ -36,7 +34,6 @@ export const FORM_JSON = {
       "id": "number_of_solar_panels",
       "type": "text",
       "required": true,
-      "presentation": "inline",
       "placeholder": "1, 2, 3, 4, 5, 6, 7, 8, 9, 10",
       "context": "For installation coordination and updates",
     },
@@ -45,7 +42,6 @@ export const FORM_JSON = {
       "id": "email",
       "type": "text",
       "required": true,
-      "presentation": "inline",
       "placeholder": "you@example.com",
       "validation": {
         "pattern": "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$",
@@ -56,7 +52,6 @@ export const FORM_JSON = {
       "order": 5,
       "id": "address",
       "type": "form",
-      "presentation": "form_group",
       "required": true,
       "placeholder": "e.g., 123 Street, Bangalore, 560001",
       "children": [
@@ -69,6 +64,12 @@ export const FORM_JSON = {
             "minLength": 3,
             "maxLength": 500
           },
+        },
+        {
+          "id": "address_line_2",
+          "type": "text",
+          "placeholder": "Apartment, suite, etc.",
+          "required": false,
         },
         {
           "id": "pin_code",
@@ -104,12 +105,11 @@ export const FORM_JSON = {
       "order": 6,
       "id": "nets_interest",
       "type": "choice",
-      "presentation": "buttons",
       "required": true,
       "placeholder": "Yes or No",
       "options": [
-        { "value": "yes", "label": "Yes, I'm interested", "description": "Protects against birds, debris, and weather" },
-        { "value": "no", "label": "No, not needed", "description": "Standard installation without nets" }
+        { "value": "yes", "label": "Yes, I'm interested", },
+        { "value": "no", "label": "No, not needed" }
       ],
       "context": "Helps us prepare accurate quote with optional add-ons",
     },
@@ -117,14 +117,13 @@ export const FORM_JSON = {
       "order": 7,
       "id": "attachments",
       "type": "files",
-      "presentation": "upload_group",
       "required": false,
       "placeholder": "Upload photos of your site, roof, and angles",
       "context": "Optional but highly recommended for precise quotes",
       "children": [
         {
           "id": "site_photos",
-          "type": "upload",
+          "type": "file",
           "required": false,
           "accept": ["image/*"],
           "maxFiles": 3,
@@ -132,7 +131,7 @@ export const FORM_JSON = {
         },
         {
           "id": "roof_photos",
-          "type": "upload",
+          "type": "file",
           "required": false,
           "accept": ["image/*"],
           "maxFiles": 3,
@@ -140,25 +139,34 @@ export const FORM_JSON = {
         },
         {
           "id": "angle_photos",
-          "type": "upload",
+          "type": "file",
           "required": false,
           "accept": ["image/*"],
           "maxFiles": 3,
+          "maxSize": "10MB",
+        },
+        {
+          "id": "panel_photos",
+          "type": "file",
+          "required": false,
+          "accept": ["image/*"],
+          "maxFiles": 2,
           "maxSize": "10MB",
         }
       ],
     },
     {
       "order": 8,
-      "id": "panel_photo",
-      "type": "file",
-      "presentation": "upload",
+      "id": "panel_company_name",
+      "type": "text",
       "required": false,
-      "placeholder": "Upload a photo of your solar panel",
-      "accept": ["image/*"],
-      "maxFiles": 1,
-      "maxSize": "10MB",
-      "context": "Optional but highly recommended for precise quotes",
+      "placeholder": "e.g., Sunpower, Tesla, etc.",
+      "validation": {
+        "minLength": 3,
+        "maxLength": 120,
+        "pattern": "^[a-zA-Z\\s]+$",
+      },
+      "context": "Optional but highly recommended for precise quotes. Which helps us to identify the panel company and their products",
     }
   ],
 
@@ -168,8 +176,8 @@ export const FORM_JSON = {
       "create_customer_record",
       "send_confirmation_email",
       "notify_sales_team",
-      "close_conversation"
+      "close_conversation",
     ],
-    "uiHint": { "presentation": "show_summary" }
+    "type": "summary"
   }
 };

@@ -66,7 +66,7 @@ export async function createConversation(params: CreateConversationParams): Prom
 
 export async function sendMessageWithBusinessLogic(
     conversationId: string,
-    text: string,
+    userMessageText: string,
     attachmentIds?: string[]
 ): Promise<{
     conversation: IConversation;
@@ -84,15 +84,19 @@ export async function sendMessageWithBusinessLogic(
 
     const metadata: any = {};
 
+    // Normalize attachmentIds - ensure it's always an array
+    const normalizedAttachmentIds = attachmentIds && attachmentIds.length > 0
+        ? Array.from(new Set(attachmentIds))
+        : [];
+
     // 1. Prepare and save user message
-    const messageText = await prepareUserMessage(text, attachmentIds);
-    const userMessage = createUserMessage(messageText, attachmentIds);
+    const userMessage = createUserMessage(userMessageText, normalizedAttachmentIds);
     conversation.messages.push(userMessage);
     conversation.messageCount = (conversation.messageCount || 0) + 1;
     await conversation.save();
 
     // 2. Get LLM response
-    const llmMessage = prepareLLMMessage(messageText, attachmentIds);
+    const llmMessage = prepareLLMMessage(userMessageText, normalizedAttachmentIds);
     const llmResponse = await getLLMResponse(conversation, llmMessage, conversationId);
 
     // 3. Save assistant message
@@ -101,19 +105,19 @@ export async function sendMessageWithBusinessLogic(
     conversation.messageCount = (conversation.messageCount || 0) + 1;
     await conversation.save();
 
-    // 4. Handle business logic based on LLM response (AFTER LLM response)
+    // 4. Handle business logic based on LLM response
     if (llmResponse?.action === 'store_answer') {
         await handleStoreAnswer(
             conversation,
             llmResponse,
             userMessage,
-            attachmentIds,
+            normalizedAttachmentIds,
             metadata
         );
     }
 
     if (llmResponse?.action === 'complete') {
-        await handleCompletion(conversation, llmResponse, metadata);
+        await handleCompletion(conversation, llmResponse, normalizedAttachmentIds, metadata);
     }
 
     // 5. Populate and return
@@ -125,41 +129,23 @@ export async function sendMessageWithBusinessLogic(
 
 // ==================== HELPER FUNCTIONS ====================
 
-async function prepareUserMessage(text: string, attachmentIds?: string[]): Promise<string> {
-    if (!attachmentIds || attachmentIds.length === 0) {
-        return text;
-    }
-
-    const uniqueIds = Array.from(new Set(attachmentIds));
-    const attachments = await Attachment.find({ _id: { $in: uniqueIds } });
-    const urls = attachments.map(att => att.url).join(', ');
-
-    return text.includes(urls) ? text : (text.trim() ? `${text} ${urls}` : urls);
-}
-
-function createUserMessage(text: string, attachmentIds?: string[]): IMessage {
-    const uniqueIds = attachmentIds ? Array.from(new Set(attachmentIds)) : [];
+function createUserMessage(text: string, attachmentIds: string[]): IMessage {
     return {
         role: 'user',
         text,
-        attachments: uniqueIds.map(id => id as any),
+        attachments: attachmentIds.map(id => id as any),
         createdAt: new Date()
     };
 }
 
-function prepareLLMMessage(messageText: string, attachmentIds?: string[]): string {
-    if (!attachmentIds || attachmentIds.length === 0) {
-        return messageText;
+function prepareLLMMessage(userMessageText: string, attachmentIds: string[]): string {
+    if (attachmentIds.length === 0) {
+        return userMessageText;
     }
 
-    const uniqueIds = Array.from(new Set(attachmentIds));
-    const idList = uniqueIds.join(', ');
-
-    // Remove URLs from message
-    let llmMessage = messageText.replace(/https?:\/\/[^\s]+/g, '').trim();
-
-    return llmMessage
-        ? `${llmMessage} [Attachment IDs: ${idList}]`
+    const idList = attachmentIds.join(', ');
+    return userMessageText
+        ? `${userMessageText} [Attachment IDs: ${idList}]`
         : `[Attachment IDs: ${idList}]`;
 }
 
@@ -202,7 +188,7 @@ async function handleStoreAnswer(
     conversation: IConversation,
     llmResponse: any,
     userMessage: IMessage,
-    attachmentIds: string[] | undefined,
+    attachmentIds: string[],
     metadata: any
 ): Promise<void> {
     const { storedQuestionId, value, uiHint } = llmResponse;
@@ -211,7 +197,6 @@ async function handleStoreAnswer(
         return;
     }
 
-    // Get field type from uiHint
     const fieldType = uiHint?.type || 'text';
     const collectedAnswers = collectAnswers(conversation.messages);
 
@@ -227,14 +212,10 @@ async function handleStoreAnswer(
             await conversation.save();
         }
 
-        // Handle attachments AFTER LLM response (for upload fields)
-        if (isUploadField(fieldType, storedQuestionId) && attachmentIds && attachmentIds.length > 0) {
-            await linkAttachments(
-                customer._id.toString(),
-                attachmentIds,
-                userMessage,
-                conversation
-            );
+        // Handle attachments for upload fields
+        if (isUploadField(fieldType, storedQuestionId) && attachmentIds.length > 0) {
+            await linkAttachmentsToCustomer(customer._id.toString(), attachmentIds);
+            logger.info(`Linked ${attachmentIds.length} attachment(s) to customer ${customer._id}`);
         }
 
         // Send email if email was collected
@@ -258,6 +239,7 @@ async function handleStoreAnswer(
 async function handleCompletion(
     conversation: IConversation,
     llmResponse: any,
+    attachmentIds: string[],
     metadata: any
 ): Promise<void> {
     // Store the final field if present
@@ -273,6 +255,12 @@ async function handleCompletion(
 
             if (!conversation.customerId) {
                 conversation.customerId = customer._id;
+            }
+
+            // Link final attachments if this was an upload field
+            if (isUploadField(fieldType, llmResponse.storedQuestionId) && attachmentIds.length > 0) {
+                await linkAttachmentsToCustomer(customer._id.toString(), attachmentIds);
+                logger.info(`Linked final ${attachmentIds.length} attachment(s) on completion`);
             }
         } catch (error: any) {
             logger.error(`Failed to store final field on completion: ${error.message}`);
@@ -321,7 +309,7 @@ async function handleCompletion(
 
             metadata.completed = true;
             metadata.customerData = customerData;
-            logger.info(`Conversation ${conversation._id} completed`);
+            logger.info(`Conversation ${conversation._id} completed successfully`);
         } catch (error: any) {
             logger.error(`Failed to fetch customer data: ${error.message}`);
         }
@@ -332,16 +320,19 @@ async function handleCompletion(
 
 function collectAnswers(messages: IMessage[]): Record<string, { value: any; type: string }> {
     const answers: Record<string, { value: any; type: string }> = {};
+
     messages.forEach(msg => {
         if (msg.payload?.action === 'store_answer' &&
             msg.payload.storedQuestionId &&
-            msg.payload.value !== null) {
+            msg.payload.value !== null &&
+            msg.payload.value !== undefined) {
             answers[msg.payload.storedQuestionId] = {
                 value: msg.payload.value,
                 type: msg.payload.uiHint?.type || 'text'
             };
         }
     });
+
     return answers;
 }
 
@@ -351,7 +342,7 @@ function findEmailInAnswers(answers: Record<string, { value: any; type: string }
         return answers.email.value;
     }
 
-    // Search in form groups (type: "form")
+    // Search in form groups
     for (const key in answers) {
         const answer = answers[key];
         if (answer.type === 'form' && answer.value?.email) {
@@ -366,7 +357,6 @@ async function updateOrCreateCustomer(
     conversationId: string,
     allAnswers: Record<string, { value: any; type: string }>
 ): Promise<{ customer: any; isNew: boolean }> {
-    // Find email from collected answers
     const email = findEmailInAnswers(allAnswers);
 
     if (!email) {
@@ -409,9 +399,14 @@ async function createNewCustomer(
 ): Promise<any> {
     const profile = buildProfileUpdates(answers);
 
+    // Extract all attachment IDs from answers
+    const attachmentIds = extractAllAttachmentIds(answers);
+
     const customerData = {
         profile,
-        attachments: [],
+        attachments: attachmentIds.map(id =>
+            mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : id
+        ),
         meta: {
             createdFromConversation: conversationId,
             createdAt: new Date()
@@ -421,13 +416,7 @@ async function createNewCustomer(
     const customer = new Customer(customerData);
     await customer.save();
 
-    logger.info(`Created new customer ${customer._id}`);
-
-    // Handle attachments in answers
-    const attachmentIds = extractAttachmentIdsFromAnswers(answers);
-    if (attachmentIds.length > 0) {
-        await linkAttachmentsToCustomer(customer._id.toString(), attachmentIds);
-    }
+    logger.info(`Created new customer ${customer._id} with ${attachmentIds.length} attachment(s)`);
 
     return customer;
 }
@@ -445,17 +434,16 @@ function buildProfileUpdates(answers: Record<string, { value: any; type: string 
             return;
         }
 
-        // Store based on type from FORM_JSON
+        // Store based on type
         switch (type) {
             case 'text':
+            case 'number':
             case 'choice':
-                // Simple scalar values
                 profile[questionId] = value;
                 break;
 
             case 'form':
-                // Form groups - nested object
-                // Example: address: { address_line: "...", pin_code: "...", address_country: "..." }
+                // Nested object for form groups
                 profile[questionId] = value;
                 break;
 
@@ -470,24 +458,25 @@ function buildProfileUpdates(answers: Record<string, { value: any; type: string 
 }
 
 function isUploadField(type: string, questionId: string): boolean {
-    // Check if it's an upload-related type based on FORM_JSON patterns
     return type === 'file' ||
         type === 'files' ||
-        type === 'upload' ||
-        questionId.includes('attachment') ||
-        questionId.includes('upload') ||
+        questionId === 'attachments' ||
+        questionId === 'panel_photo' ||
         questionId.includes('photo') ||
-        questionId.includes('file');
+        questionId.includes('photos') ||
+        questionId.includes('upload') ||
+        questionId.includes('attachment') ||
+        questionId.includes('document');
 }
 
-function extractAttachmentIdsFromAnswers(answers: Record<string, { value: any; type: string }>): string[] {
+function extractAllAttachmentIds(answers: Record<string, { value: any; type: string }>): string[] {
     const allIds: string[] = [];
 
     Object.entries(answers).forEach(([questionId, answer]) => {
         const { value, type } = answer;
 
         if (isUploadField(type, questionId)) {
-            const ids = extractAttachmentIds(value);
+            const ids = extractAttachmentIdsFromValue(value);
             allIds.push(...ids);
         }
     });
@@ -495,77 +484,37 @@ function extractAttachmentIdsFromAnswers(answers: Record<string, { value: any; t
     return Array.from(new Set(allIds)); // Deduplicate
 }
 
-// ==================== ATTACHMENT HANDLING ====================
-
-async function linkAttachments(
-    customerId: string,
-    attachmentIds: string[],
-    userMessage: IMessage,
-    conversation: IConversation
-): Promise<void> {
-    const uniqueIds = Array.from(new Set(attachmentIds));
-
-    // Link to message
-    if (!userMessage.attachments) {
-        userMessage.attachments = [];
-    }
-    uniqueIds.forEach(id => {
-        if (!userMessage.attachments!.some(aid => aid.toString() === id)) {
-            userMessage.attachments!.push(id as any);
-        }
-    });
-
-    // Link to customer (atomic operation)
-    await linkAttachmentsToCustomer(customerId, uniqueIds);
-
-    await conversation.save();
-}
-
-async function linkAttachmentsToCustomer(customerId: string, attachmentIds: string[]): Promise<void> {
-    if (attachmentIds.length === 0) return;
-
-    try {
-        const objectIds = attachmentIds.map(id =>
-            mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : id
-        );
-
-        await Customer.findByIdAndUpdate(
-            customerId,
-            { $addToSet: { attachments: { $each: objectIds } } },
-            { new: true }
-        );
-
-        logger.info(`Linked ${attachmentIds.length} attachment(s) to customer ${customerId}`);
-    } catch (error: any) {
-        logger.error(`Failed to link attachments: ${error.message}`);
-    }
-}
-
-function extractAttachmentIds(value: any): string[] {
+function extractAttachmentIdsFromValue(value: any): string[] {
     if (!value) return [];
 
     // Single string ID
     if (typeof value === 'string') {
-        return [value];
+        return mongoose.Types.ObjectId.isValid(value) ? [value] : [];
     }
 
-    // Array of IDs or objects
+    // Array of IDs
     if (Array.isArray(value)) {
         return value
             .map((item: any) => {
-                if (typeof item === 'string') return item;
-                if (item?._id) return item._id;
-                if (item?.id) return item.id;
+                if (typeof item === 'string' && mongoose.Types.ObjectId.isValid(item)) {
+                    return item;
+                }
+                if (item?._id && mongoose.Types.ObjectId.isValid(item._id)) {
+                    return item._id.toString();
+                }
+                if (item?.id && mongoose.Types.ObjectId.isValid(item.id)) {
+                    return item.id.toString();
+                }
                 return null;
             })
-            .filter(Boolean);
+            .filter(Boolean) as string[];
     }
 
-    // Nested object (for form groups with uploads)
+    // Object (shouldn't happen for file fields, but handle gracefully)
     if (typeof value === 'object') {
         const ids: string[] = [];
         Object.values(value).forEach((v: any) => {
-            ids.push(...extractAttachmentIds(v));
+            ids.push(...extractAttachmentIdsFromValue(v));
         });
         return ids;
     }
@@ -573,12 +522,39 @@ function extractAttachmentIds(value: any): string[] {
     return [];
 }
 
+// ==================== ATTACHMENT HANDLING ====================
+
+async function linkAttachmentsToCustomer(customerId: string, attachmentIds: string[]): Promise<void> {
+    if (attachmentIds.length === 0) return;
+
+    try {
+        // Validate and convert to ObjectIds
+        const objectIds = attachmentIds
+            .filter(id => mongoose.Types.ObjectId.isValid(id))
+            .map(id => new mongoose.Types.ObjectId(id));
+
+        if (objectIds.length === 0) {
+            logger.warn('No valid attachment IDs to link');
+            return;
+        }
+
+        // Update customer with attachments (atomic operation)
+        await Customer.findByIdAndUpdate(
+            customerId,
+            { $addToSet: { attachments: { $each: objectIds } } },
+            { new: true }
+        );
+
+        logger.info(`Successfully linked ${objectIds.length} attachment(s) to customer ${customerId}`);
+    } catch (error: any) {
+        logger.error(`Failed to link attachments to customer ${customerId}: ${error.message}`);
+        throw error;
+    }
+}
+
 // ==================== EMAIL HANDLING ====================
 
-async function sendEmailSafe(
-    emailFn: Function,
-    ...args: any[]
-): Promise<void> {
+async function sendEmailSafe(emailFn: Function, ...args: any[]): Promise<void> {
     if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
         logger.warn('SMTP not configured - email not sent');
         return;
@@ -586,7 +562,7 @@ async function sendEmailSafe(
 
     try {
         await emailFn(...args);
-        logger.info(`Email sent successfully`);
+        logger.info('Email sent successfully');
     } catch (error: any) {
         logger.error(`Failed to send email: ${error.message}`);
     }
