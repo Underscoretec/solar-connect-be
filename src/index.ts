@@ -29,7 +29,16 @@ app.use(express.json({
 }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Serve static files from public directory
+// Serve static files from public directory with CORS headers
+// app.use('/uploads', (req, res, next) => {
+//   // Set CORS headers for static file requests
+//   const origin = req.headers.origin;
+//   if (origin && whitelist.includes(origin)) {
+//     res.setHeader('Access-Control-Allow-Origin', origin);
+//     res.setHeader('Access-Control-Allow-Credentials', 'true');
+//   }
+//   next();
+// });
 app.use(express.static(path.join(process.cwd(), 'public')));
 
 // Database connection function

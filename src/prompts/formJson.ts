@@ -90,6 +90,15 @@ export const FORM_JSON = {
           },
         },
         {
+          "id": "state",
+          "type": "text",
+          "placeholder": "Karnataka",
+          "required": true,
+          "validation": {
+            "pattern": "^[a-zA-Z\\s'-]+$",
+          },
+        },
+        {
           "id": "address_country",
           "type": "text",
           "placeholder": "India",
@@ -109,7 +118,8 @@ export const FORM_JSON = {
       "placeholder": "Yes or No",
       "options": [
         { "value": "yes", "label": "Yes, I'm interested", },
-        { "value": "no", "label": "No, not needed" }
+        { "value": "no", "label": "No, not needed" },
+        { "value": "not_sure", "label": "I'm not sure" }
       ],
       "context": "Helps us prepare accurate quote with optional add-ons",
     },
