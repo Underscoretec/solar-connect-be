@@ -16,7 +16,6 @@ const attachmentSchema = new Schema<IAttachment>({
   type: {
     type: String,
     required: true,
-    enum: ['site_photo', 'roof_photo', 'angle_photo', 'other']
   },
   mimeType: {
     type: String
