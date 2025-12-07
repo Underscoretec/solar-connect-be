@@ -2,8 +2,6 @@ import * as mongoose from "mongoose";
 import { ICustomer } from "../interfaces";
 let Schema = mongoose.Schema;
 
-
-
 const customerSchema = new Schema<ICustomer>({
     profile: {
         type: Schema.Types.Mixed,

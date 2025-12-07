@@ -2,10 +2,9 @@ import config from '../../config';
 import logger from '../logger';
 import Conversation from './model';
 import Customer from '../customers/model';
-import Attachment from '../attachments/model';
 import { callGemini } from '../../lib/llm';
 import { sendConversationLinkEmail, sendThankYouEmail } from '../../lib/mail';
-import { normalizeEmail, isValidEmail, isValidPhone } from '../../lib/helpers';
+import { normalizeEmail, isValidEmail } from '../../lib/helpers';
 import { IConversation, IMessage } from '../interfaces';
 import mongoose from 'mongoose';
 
@@ -71,56 +70,72 @@ export async function sendMessageWithBusinessLogic(
 ): Promise<{
     conversation: IConversation;
     metadata: {
-        emailConfirmed?: boolean;
+        emailSent?: boolean;
         isExistingCustomer?: boolean;
         completed?: boolean;
         customerData?: any;
     }
 }> {
-    const conversation = await Conversation.findById(conversationId);
+    const conversation = await Conversation.findById(conversationId)
+        .populate('customerId')
+        .populate('messages.attachments');
+
     if (!conversation) {
         throw new Error('Conversation not found');
     }
 
     const metadata: any = {};
-
-    // Normalize attachmentIds - ensure it's always an array
-    const normalizedAttachmentIds = attachmentIds && attachmentIds.length > 0
+    const normalizedAttachmentIds = attachmentIds?.length
         ? Array.from(new Set(attachmentIds))
         : [];
 
-    // 1. Prepare and save user message
+    // 1. Save user message with attachments
     const userMessage = createUserMessage(userMessageText, normalizedAttachmentIds);
     conversation.messages.push(userMessage);
     conversation.messageCount = (conversation.messageCount || 0) + 1;
     await conversation.save();
 
-    // 2. Get LLM response
+    // 2. Prepare LLM context with existing customer data if available
     const llmMessage = prepareLLMMessage(userMessageText, normalizedAttachmentIds);
-    const llmResponse = await getLLMResponse(conversation, llmMessage, conversationId);
+    const existingCustomerContext = conversation.customerId
+        ? await getCustomerContext(conversation.customerId._id || conversation.customerId)
+        : null;
 
-    // 3. Save assistant message
+    // 3. Get LLM response
+    const llmResponse = await getLLMResponse(
+        conversation,
+        llmMessage,
+        conversationId,
+        existingCustomerContext
+    );
+
+    // 4. Save assistant message
     const assistantMessage = createAssistantMessage(llmResponse);
     conversation.messages.push(assistantMessage);
     conversation.messageCount = (conversation.messageCount || 0) + 1;
-    await conversation.save();
 
-    // 4. Handle business logic based on LLM response
-    if (llmResponse?.action === 'store_answer') {
-        await handleStoreAnswer(
+    // 5. Process based on action type
+    if (llmResponse?.action === 'store_answer' && llmResponse.storedQuestionId) {
+        await processStoreAnswer(
             conversation,
             llmResponse,
-            userMessage,
             normalizedAttachmentIds,
             metadata
         );
     }
 
-    if (llmResponse?.action === 'complete') {
-        await handleCompletion(conversation, llmResponse, normalizedAttachmentIds, metadata);
+    if (llmResponse?.completed) {
+        await processCompletion(
+            conversation,
+            llmResponse,
+            normalizedAttachmentIds,
+            metadata
+        );
     }
 
-    // 5. Populate and return
+    await conversation.save();
+
+    // 6. Populate and return
     await conversation.populate('messages.attachments');
     await conversation.populate('customerId');
 
@@ -149,13 +164,33 @@ function prepareLLMMessage(userMessageText: string, attachmentIds: string[]): st
         : `[Attachment IDs: ${idList}]`;
 }
 
+async function getCustomerContext(customerId: any): Promise<string | null> {
+    try {
+        const customer = await Customer.findById(customerId)
+            .populate('attachments')
+            .lean();
+
+        if (!customer) return null;
+
+        return `\n\n[EXISTING CUSTOMER CONTEXT]\nThe user is a returning customer. Their current profile data:\n${JSON.stringify(customer.profile || {}, null, 2)}\n\nThey have ${customer.attachments?.length || 0} attachment(s) on file.\n\nIMPORTANT: Allow them to update any existing field or add new information. When they provide updated values, store them normally using store_answer.\n[END EXISTING CUSTOMER CONTEXT]\n`;
+    } catch (error) {
+        logger.error(`Failed to fetch customer context: ${error}`);
+        return null;
+    }
+}
+
 async function getLLMResponse(
     conversation: IConversation,
     llmMessage: string,
-    conversationId: string
+    conversationId: string,
+    customerContext?: string | null
 ): Promise<any> {
     try {
-        return await callGemini(conversation.messages, llmMessage);
+        const enhancedMessage = customerContext
+            ? `${llmMessage}${customerContext}`
+            : llmMessage;
+
+        return await callGemini(conversation.messages, enhancedMessage);
     } catch (error: any) {
         logger.error(`Failed to call LLM for conversation ${conversationId}: ${error.message}`);
         const isRateLimit = error.message?.includes('429') ||
@@ -182,12 +217,33 @@ function createAssistantMessage(llmResponse: any): IMessage {
     };
 }
 
-// ==================== BUSINESS LOGIC HANDLERS ====================
+// ==================== COLLECT ALL ANSWERS ====================
 
-async function handleStoreAnswer(
+function collectAllAnswersFromMessages(messages: IMessage[]): Record<string, any> {
+    const collectedData: Record<string, any> = {};
+
+    messages.forEach(msg => {
+        if (msg.role === 'assistant' &&
+            msg.payload?.action === 'store_answer' &&
+            msg.payload.storedQuestionId &&
+            msg.payload.value !== null &&
+            msg.payload.value !== undefined) {
+
+            collectedData[msg.payload.storedQuestionId] = {
+                value: msg.payload.value,
+                type: msg.payload.uiHint?.type || 'text'
+            };
+        }
+    });
+
+    return collectedData;
+}
+
+// ==================== CORE PROCESSING ====================
+
+async function processStoreAnswer(
     conversation: IConversation,
     llmResponse: any,
-    userMessage: IMessage,
     attachmentIds: string[],
     metadata: any
 ): Promise<void> {
@@ -198,87 +254,187 @@ async function handleStoreAnswer(
     }
 
     const fieldType = uiHint?.type || 'text';
-    const collectedAnswers = collectAnswers(conversation.messages);
 
-    try {
-        const { customer, isNew } = await updateOrCreateCustomer(
-            conversation._id.toString(),
-            collectedAnswers
-        );
+    // Special handling for email field - this triggers customer creation/lookup
+    if (storedQuestionId === 'email') {
+        const normalizedEmail = normalizeEmail(value);
 
-        // Link customer to conversation
-        if (!conversation.customerId) {
-            conversation.customerId = customer._id;
-            await conversation.save();
+        if (!isValidEmail(normalizedEmail)) {
+            logger.warn(`Invalid email format: ${value}`);
+            return;
         }
 
-        // Handle attachments for upload fields
-        if (isUploadField(fieldType, storedQuestionId) && attachmentIds.length > 0) {
-            await linkAttachmentsToCustomer(customer._id.toString(), attachmentIds);
-            logger.info(`Linked ${attachmentIds.length} attachment(s) to customer ${customer._id}`);
-        }
+        try {
+            // Collect ALL answers from conversation history
+            const allCollectedAnswers = collectAllAnswersFromMessages(conversation.messages);
 
-        // Send email if email was collected
-        if (storedQuestionId === 'email' && value) {
-            metadata.emailConfirmed = true;
-            metadata.isExistingCustomer = !isNew;
-            await sendEmailSafe(
-                sendConversationLinkEmail,
-                value,
-                `${FRONTEND_URL}/chat?conversationId=${conversation._id}`,
-                customer.profile?.full_name || 'there'
-            );
+            // Find or create customer
+            let customer = await Customer.findOne({ 'profile.email': normalizedEmail });
+
+            if (customer) {
+                // Existing customer - update with all collected data
+                metadata.isExistingCustomer = true;
+
+                const profileUpdates = buildProfileFromAnswers(allCollectedAnswers);
+                const attachmentIdsToAdd = extractAttachmentIdsFromAnswers(allCollectedAnswers);
+
+                // Update customer with all collected data
+                const updateData: any = {
+                    $set: {
+                        profile: { ...customer.profile, ...profileUpdates },
+                        'meta.lastUpdated': new Date(),
+                        'meta.lastConversation': conversation._id.toString()
+                    }
+                };
+
+                // Add attachments if any
+                // if (attachmentIdsToAdd.length > 0) {
+                //     const validIds = attachmentIdsToAdd
+                //         .filter(id => mongoose.Types.ObjectId.isValid(id))
+                //         .map(id => new mongoose.Types.ObjectId(id));
+
+                //     if (validIds.length > 0) {
+                //         updateData.$addToSet = {
+                //             attachments: { $each: validIds }
+                //         };
+                //     }
+                // }
+
+                customer = await Customer.findByIdAndUpdate(
+                    customer._id,
+                    updateData,
+                    { new: true, runValidators: true }
+                );
+
+                // Link to conversation
+                conversation.customerId = customer?._id;
+
+                logger.info(`Updated existing customer ${customer?._id} with all collected data`);
+            } else {
+                // New customer - create with all collected data
+                const profileData = buildProfileFromAnswers(allCollectedAnswers);
+                const attachmentIdsToAdd = extractAttachmentIdsFromAnswers(allCollectedAnswers);
+
+                const validIds = attachmentIdsToAdd
+                    .filter(id => mongoose.Types.ObjectId.isValid(id))
+                    .map(id => new mongoose.Types.ObjectId(id));
+
+                customer = new Customer({
+                    profile: profileData,
+                    attachments: validIds,
+                    meta: {
+                        createdFromConversation: conversation._id.toString(),
+                        createdAt: new Date()
+                    }
+                });
+
+                await customer.save();
+
+                conversation.customerId = customer._id;
+                metadata.isExistingCustomer = false;
+
+                logger.info(`Created new customer ${customer._id} with all collected data`);
+
+                // Send conversation link email
+                await sendEmailSafe(
+                    sendConversationLinkEmail,
+                    normalizedEmail,
+                    `${FRONTEND_URL}/chat?conversationId=${conversation._id}`,
+                    customer.profile?.full_name || 'there'
+                );
+
+                metadata.emailSent = true;
+            }
+        } catch (error: any) {
+            logger.error(`Failed to process email and create/update customer: ${error.message}`);
+            return;
         }
-    } catch (error: any) {
-        logger.error(`Failed to update customer: ${error.message}`);
-        storePendingData(conversation, storedQuestionId, value, fieldType);
-        await conversation.save();
+    } else {
+        // Non-email field - update customer if customer exists
+        if (conversation.customerId) {
+            try {
+                const updateData: any = {
+                    $set: {
+                        [`profile.${storedQuestionId}`]: value,
+                        'meta.lastUpdated': new Date(),
+                        'meta.lastConversation': conversation._id.toString()
+                    }
+                };
+
+                // Handle attachments for file/files type
+                if (isFileField(fieldType, storedQuestionId) && attachmentIds.length > 0) {
+                    const validIds = attachmentIds
+                        .filter(id => mongoose.Types.ObjectId.isValid(id))
+                        .map(id => new mongoose.Types.ObjectId(id));
+
+                    if (validIds.length > 0) {
+                        updateData.$addToSet = {
+                            attachments: { $each: validIds }
+                        };
+                    }
+                }
+
+                await Customer.findByIdAndUpdate(
+                    conversation.customerId,
+                    updateData,
+                    { new: true, runValidators: true }
+                );
+
+                logger.info(`Updated customer ${conversation.customerId} field: ${storedQuestionId}`);
+            } catch (error: any) {
+                logger.error(`Failed to update customer field ${storedQuestionId}: ${error.message}`);
+            }
+        } else {
+            // No customer yet - this is expected before email is collected
+            logger.debug(`Field ${storedQuestionId} collected but no customer yet (email not collected)`);
+        }
     }
 }
 
-async function handleCompletion(
+async function processCompletion(
     conversation: IConversation,
     llmResponse: any,
     attachmentIds: string[],
     metadata: any
 ): Promise<void> {
-    // Store the final field if present
+    // Store final field if present
     if (llmResponse.storedQuestionId && llmResponse.value !== null && llmResponse.value !== undefined) {
-        const fieldType = llmResponse.uiHint?.type || 'text';
-        const collectedAnswers = collectAnswers(conversation.messages);
-
-        try {
-            const { customer } = await updateOrCreateCustomer(
-                conversation._id.toString(),
-                collectedAnswers
-            );
-
-            if (!conversation.customerId) {
-                conversation.customerId = customer._id;
-            }
-
-            // Link final attachments if this was an upload field
-            if (isUploadField(fieldType, llmResponse.storedQuestionId) && attachmentIds.length > 0) {
-                await linkAttachmentsToCustomer(customer._id.toString(), attachmentIds);
-                logger.info(`Linked final ${attachmentIds.length} attachment(s) on completion`);
-            }
-        } catch (error: any) {
-            logger.error(`Failed to store final field on completion: ${error.message}`);
-        }
+        await processStoreAnswer(conversation, llmResponse, attachmentIds, metadata);
     }
 
-    // Ensure customer exists
+    // Ensure customer exists before closing
     if (!conversation.customerId) {
-        const collectedAnswers = collectAnswers(conversation.messages);
-        const email = findEmailInAnswers(collectedAnswers);
+        // Try to create customer from collected data
+        const allCollectedAnswers = collectAllAnswersFromMessages(conversation.messages);
+        const email = allCollectedAnswers.email?.value;
 
-        if (email) {
+        if (email && isValidEmail(normalizeEmail(email))) {
             try {
-                const { customer } = await updateOrCreateCustomer(
-                    conversation._id.toString(),
-                    collectedAnswers
-                );
-                conversation.customerId = customer._id;
+                const normalizedEmail = normalizeEmail(email);
+                let customer = await Customer.findOne({ 'profile.email': normalizedEmail });
+
+                if (!customer) {
+                    const profileData = buildProfileFromAnswers(allCollectedAnswers);
+                    const attachmentIdsToAdd = extractAttachmentIdsFromAnswers(allCollectedAnswers);
+
+                    const validIds = attachmentIdsToAdd
+                        .filter(id => mongoose.Types.ObjectId.isValid(id))
+                        .map(id => new mongoose.Types.ObjectId(id));
+
+                    customer = new Customer({
+                        profile: profileData,
+                        attachments: validIds,
+                        meta: {
+                            createdFromConversation: conversation._id.toString(),
+                            createdAt: new Date()
+                        }
+                    });
+
+                    await customer.save();
+                    conversation.customerId = customer._id;
+
+                    logger.info(`Created customer ${customer._id} on completion`);
+                }
             } catch (error: any) {
                 logger.error(`Failed to create customer on completion: ${error.message}`);
             }
@@ -287,195 +443,63 @@ async function handleCompletion(
 
     // Close conversation
     conversation.status = 'closed';
-    await conversation.save();
 
-    // Get customer data and send thank you email
+    // Send thank you email
     if (conversation.customerId) {
         try {
-            const customerData = await Customer.findById(conversation.customerId)
+            const customer = await Customer.findById(conversation.customerId)
                 .populate('attachments')
-                .select('-__v')
                 .lean();
 
-            const email = customerData?.profile?.email;
+            const email = customer?.profile?.email;
             if (email) {
                 await sendEmailSafe(
                     sendThankYouEmail,
                     email,
-                    customerData.profile?.full_name || 'there',
-                    customerData
+                    customer.profile?.full_name || 'there',
+                    customer
                 );
             }
 
             metadata.completed = true;
-            metadata.customerData = customerData;
+            metadata.customerData = customer;
+
             logger.info(`Conversation ${conversation._id} completed successfully`);
         } catch (error: any) {
-            logger.error(`Failed to fetch customer data: ${error.message}`);
+            logger.error(`Failed to process completion: ${error.message}`);
         }
     }
 }
 
-// ==================== CUSTOMER MANAGEMENT ====================
+// ==================== BUILD PROFILE FROM ANSWERS ====================
 
-function collectAnswers(messages: IMessage[]): Record<string, { value: any; type: string }> {
-    const answers: Record<string, { value: any; type: string }> = {};
-
-    messages.forEach(msg => {
-        if (msg.payload?.action === 'store_answer' &&
-            msg.payload.storedQuestionId &&
-            msg.payload.value !== null &&
-            msg.payload.value !== undefined) {
-            answers[msg.payload.storedQuestionId] = {
-                value: msg.payload.value,
-                type: msg.payload.uiHint?.type || 'text'
-            };
-        }
-    });
-
-    return answers;
-}
-
-function findEmailInAnswers(answers: Record<string, { value: any; type: string }>): string | null {
-    // Direct email field
-    if (answers.email?.value) {
-        return answers.email.value;
-    }
-
-    // Search in form groups
-    for (const key in answers) {
-        const answer = answers[key];
-        if (answer.type === 'form' && answer.value?.email) {
-            return answer.value.email;
-        }
-    }
-
-    return null;
-}
-
-async function updateOrCreateCustomer(
-    conversationId: string,
-    allAnswers: Record<string, { value: any; type: string }>
-): Promise<{ customer: any; isNew: boolean }> {
-    const email = findEmailInAnswers(allAnswers);
-
-    if (!email) {
-        throw new Error('Cannot create/update customer without email');
-    }
-
-    const normalizedEmail = normalizeEmail(email);
-    if (!isValidEmail(normalizedEmail)) {
-        throw new Error('Invalid email format');
-    }
-
-    let customer = await Customer.findOne({ 'profile.email': normalizedEmail });
-
-    if (customer) {
-        // Update existing customer
-        const profileUpdates = buildProfileUpdates(allAnswers);
-        customer = await Customer.findByIdAndUpdate(
-            customer._id,
-            {
-                $set: {
-                    profile: profileUpdates,
-                    'meta.lastUpdated': new Date(),
-                    'meta.lastConversation': conversationId
-                }
-            },
-            { new: true, runValidators: true }
-        );
-        logger.info(`Updated existing customer ${customer?._id}`);
-        return { customer, isNew: false };
-    }
-
-    // Create new customer
-    customer = await createNewCustomer(allAnswers, conversationId);
-    return { customer, isNew: true };
-}
-
-async function createNewCustomer(
-    answers: Record<string, { value: any; type: string }>,
-    conversationId: string
-): Promise<any> {
-    const profile = buildProfileUpdates(answers);
-
-    // Extract all attachment IDs from answers
-    const attachmentIds = extractAllAttachmentIds(answers);
-
-    const customerData = {
-        profile,
-        attachments: attachmentIds.map(id =>
-            mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : id
-        ),
-        meta: {
-            createdFromConversation: conversationId,
-            createdAt: new Date()
-        }
-    };
-
-    const customer = new Customer(customerData);
-    await customer.save();
-
-    logger.info(`Created new customer ${customer._id} with ${attachmentIds.length} attachment(s)`);
-
-    return customer;
-}
-
-function buildProfileUpdates(answers: Record<string, { value: any; type: string }>): Record<string, any> {
+function buildProfileFromAnswers(answers: Record<string, any>): Record<string, any> {
     const profile: Record<string, any> = {};
 
-    Object.entries(answers).forEach(([questionId, answer]) => {
-        const { value, type } = answer;
+    Object.entries(answers).forEach(([questionId, data]) => {
+        const { value, type } = data;
 
         if (value === null || value === undefined) return;
 
-        // Skip upload fields - they go to attachments array
-        if (isUploadField(type, questionId)) {
+        // Skip file fields - they go to attachments array
+        if (isFileField(type, questionId)) {
             return;
         }
 
-        // Store based on type
-        switch (type) {
-            case 'text':
-            case 'number':
-            case 'choice':
-                profile[questionId] = value;
-                break;
-
-            case 'form':
-                // Nested object for form groups
-                profile[questionId] = value;
-                break;
-
-            default:
-                // Unknown type - store as-is
-                profile[questionId] = value;
-                break;
-        }
+        // Store the value
+        profile[questionId] = value;
     });
 
     return profile;
 }
 
-function isUploadField(type: string, questionId: string): boolean {
-    return type === 'file' ||
-        type === 'files' ||
-        questionId === 'attachments' ||
-        questionId === 'panel_photo' ||
-        questionId.includes('photo') ||
-        questionId.includes('photos') ||
-        questionId.includes('upload') ||
-        questionId.includes('attachment') ||
-        questionId.includes('document');
-}
-
-function extractAllAttachmentIds(answers: Record<string, { value: any; type: string }>): string[] {
+function extractAttachmentIdsFromAnswers(answers: Record<string, any>): string[] {
     const allIds: string[] = [];
 
-    Object.entries(answers).forEach(([questionId, answer]) => {
-        const { value, type } = answer;
+    Object.entries(answers).forEach(([questionId, data]) => {
+        const { value, type } = data;
 
-        if (isUploadField(type, questionId)) {
+        if (isFileField(type, questionId)) {
             const ids = extractAttachmentIdsFromValue(value);
             allIds.push(...ids);
         }
@@ -510,49 +534,21 @@ function extractAttachmentIdsFromValue(value: any): string[] {
             .filter(Boolean) as string[];
     }
 
-    // Object (shouldn't happen for file fields, but handle gracefully)
-    if (typeof value === 'object') {
-        const ids: string[] = [];
-        Object.values(value).forEach((v: any) => {
-            ids.push(...extractAttachmentIdsFromValue(v));
-        });
-        return ids;
-    }
-
     return [];
 }
 
-// ==================== ATTACHMENT HANDLING ====================
+// ==================== UTILITIES ====================
 
-async function linkAttachmentsToCustomer(customerId: string, attachmentIds: string[]): Promise<void> {
-    if (attachmentIds.length === 0) return;
-
-    try {
-        // Validate and convert to ObjectIds
-        const objectIds = attachmentIds
-            .filter(id => mongoose.Types.ObjectId.isValid(id))
-            .map(id => new mongoose.Types.ObjectId(id));
-
-        if (objectIds.length === 0) {
-            logger.warn('No valid attachment IDs to link');
-            return;
-        }
-
-        // Update customer with attachments (atomic operation)
-        await Customer.findByIdAndUpdate(
-            customerId,
-            { $addToSet: { attachments: { $each: objectIds } } },
-            { new: true }
-        );
-
-        logger.info(`Successfully linked ${objectIds.length} attachment(s) to customer ${customerId}`);
-    } catch (error: any) {
-        logger.error(`Failed to link attachments to customer ${customerId}: ${error.message}`);
-        throw error;
-    }
+function isFileField(type: string, questionId: string): boolean {
+    return type === 'file' ||
+        type === 'files' ||
+        questionId === 'attachments' ||
+        questionId.includes('photo') ||
+        questionId.includes('photos') ||
+        questionId.includes('upload') ||
+        questionId.includes('attachment') ||
+        questionId.includes('document');
 }
-
-// ==================== EMAIL HANDLING ====================
 
 async function sendEmailSafe(emailFn: Function, ...args: any[]): Promise<void> {
     if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
@@ -566,23 +562,6 @@ async function sendEmailSafe(emailFn: Function, ...args: any[]): Promise<void> {
     } catch (error: any) {
         logger.error(`Failed to send email: ${error.message}`);
     }
-}
-
-// ==================== UTILITIES ====================
-
-function storePendingData(
-    conversation: IConversation,
-    storedQuestionId: string,
-    value: any,
-    type: string
-): void {
-    if (!conversation.meta) {
-        conversation.meta = {};
-    }
-    if (!conversation.meta.pendingCustomerData) {
-        conversation.meta.pendingCustomerData = {};
-    }
-    conversation.meta.pendingCustomerData[storedQuestionId] = { value, type };
 }
 
 // ==================== QUERY FUNCTIONS ====================
@@ -638,4 +617,62 @@ export async function getConversationsList(params: {
     const total = await Conversation.countDocuments(query);
 
     return { conversations, total };
+}
+
+export async function getDashboardStats(): Promise<{
+    totalConversations: number;
+    openConversations: number;
+    totalCustomers: number;
+    recentConversations: number;
+    leadStages: {
+        newProspects: number;
+        marketingQualified: number;
+        salesQualified: number;
+        existingCustomers: number;
+    };
+}> {
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+    const [
+        totalConversations,
+        openConversations,
+        totalCustomers,
+        recentConversations
+    ] = await Promise.all([
+        Conversation.countDocuments(),
+        Conversation.countDocuments({ status: 'open' }),
+        Customer.countDocuments(),
+        Conversation.countDocuments({ createdAt: { $gte: sevenDaysAgo } })
+    ]);
+
+    // Count lead stages from customer profiles directly
+    const customers = await Customer.find({ 'profile.leadStage': { $exists: true } })
+        .select('profile.leadStage profile.lead_stage')
+        .lean();
+
+    const leadStages = {
+        newProspects: 0,
+        marketingQualified: 0,
+        salesQualified: 0,
+        existingCustomers: 0,
+    };
+
+    customers.forEach((customer: any) => {
+        if (customer.profile) {
+            const leadStage = customer.profile.leadStage || customer.profile.lead_stage;
+            if (leadStage === 'new_prospect') leadStages.newProspects++;
+            else if (leadStage === 'marketing_qualified') leadStages.marketingQualified++;
+            else if (leadStage === 'sales_qualified') leadStages.salesQualified++;
+            else if (leadStage === 'existing_customer' || leadStage === 'returning_customer') leadStages.existingCustomers++;
+        }
+    });
+
+    return {
+        totalConversations,
+        openConversations,
+        totalCustomers,
+        recentConversations,
+        leadStages
+    };
 }

@@ -190,7 +190,7 @@ router.post('/:id/message', async (req, res) => {
 
     try {
         const { conversation, metadata } = await controllers.sendMessageWithBusinessLogic(
-            conversationId, 
+            conversationId,
             text,
             attachmentIds // Array of attachment IDs
         );
@@ -229,6 +229,29 @@ router.post('/:id/message', async (req, res) => {
                 error.message || messages["MESSAGE_SEND_FAILED"]
             )
         );
+    }
+});
+
+/**
+ * @type - GET
+ * @route -  /api/conversations/stats/dashboard
+ * @desc - Get dashboard statistics
+ * @access - Public
+ */
+router.get("/stats/dashboard", async (req, res) => {
+    try {
+        const stats = await controllers.getDashboardStats();
+
+        return res.status(200).send(
+            projection.successResponse(
+                stats as any,
+                200,
+                "DASHBOARD_STATS_FOUND",
+                "Dashboard statistics retrieved"
+            )
+        );
+    } catch (err: any) {
+        return res.status(500).send(projection.errorAPIResponse(null, 500, "INTERNAL_SERVER_ERROR", err.message));
     }
 });
 

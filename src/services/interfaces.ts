@@ -183,6 +183,34 @@ export interface User extends MongooseDocument {
 }
 
 // ============================================================================
+// FormConfig Types
+// ============================================================================
+
+
+
+export interface IFormConfig extends MongooseDocument {
+  name: string;          // Human-readable name
+  slug: string;          // For URLs, e.g., "solar-onboarding-v1"
+  description?: string;
+  version: number;
+  formJson: any;         // The full FORM_JSON object
+  createdBy?: string;    // User ID / email / tenant id, etc.
+  isActive: boolean;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+// ============================================================================
+// WelcomeMessage Types
+// ============================================================================
+
+export interface IWelcomeMessage extends MongooseDocument {
+  message: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+// ============================================================================
 // Result Type
 // ============================================================================
 

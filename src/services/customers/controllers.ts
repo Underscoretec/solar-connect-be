@@ -92,7 +92,8 @@ export async function createOrUpdateCustomer(
 }
 
 export async function getCustomerById(customerId: string): Promise<ICustomer | null> {
-    return await Customer.findById(customerId);
+    return await Customer.findById(customerId)
+        .populate('attachments');
 }
 
 export async function updateCustomerProfile(
@@ -204,6 +205,7 @@ export async function getCustomersList(params: {
     }
 
     const customers = await Customer.find(query)
+        .populate('attachments')
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit);
