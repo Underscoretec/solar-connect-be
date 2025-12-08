@@ -1,7 +1,7 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import OpenAI from "openai";
 import { FORM_JSON, FORM_JSON2 } from "../prompts/formJson";
-import { SYSTEM_PROMPT_FINAL } from "../prompts/systemPrompt";
+import { SYSTEM_PROMPT_FINAL, SYSTEM_PROMPT_V2 } from "../prompts/systemPrompt";
 import config from "../config";
 import logger from "../services/logger";
 import { parseGeminiOutput } from "./helpers";
@@ -84,7 +84,7 @@ export async function callGemini(
 ): Promise<any> {
   const logger = require('../services/logger').default;
 
-  const systemPrompt = SYSTEM_PROMPT_FINAL;
+  const systemPrompt = SYSTEM_PROMPT_V2;
   const formJson = FORM_JSON2;
 
   try {

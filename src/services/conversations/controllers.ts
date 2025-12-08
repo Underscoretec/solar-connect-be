@@ -74,6 +74,7 @@ export async function sendMessageWithBusinessLogic(
         isExistingCustomer?: boolean;
         completed?: boolean;
         customerData?: any;
+        awaitingConfirmation?: boolean;
     }
 }> {
     const conversation = await Conversation.findById(conversationId)
@@ -95,13 +96,17 @@ export async function sendMessageWithBusinessLogic(
     conversation.messageCount = (conversation.messageCount || 0) + 1;
     await conversation.save();
 
-    // 2. Prepare LLM context with existing customer data if available
+    // 2. Check if awaiting confirmation
+    const lastAssistantMsg = findLastAssistantMessage(conversation.messages);
+    const isAwaitingConfirmation = lastAssistantMsg?.payload?.action === 'request_confirmation';
+
+    // 3. Prepare LLM context
     const llmMessage = prepareLLMMessage(userMessageText, normalizedAttachmentIds);
     const existingCustomerContext = conversation.customerId
         ? await getCustomerContext(conversation.customerId._id || conversation.customerId)
         : null;
 
-    // 3. Get LLM response
+    // 4. Get LLM response
     const llmResponse = await getLLMResponse(
         conversation,
         llmMessage,
@@ -109,12 +114,12 @@ export async function sendMessageWithBusinessLogic(
         existingCustomerContext
     );
 
-    // 4. Save assistant message
+    // 5. Save assistant message
     const assistantMessage = createAssistantMessage(llmResponse);
     conversation.messages.push(assistantMessage);
     conversation.messageCount = (conversation.messageCount || 0) + 1;
 
-    // 5. Process based on action type
+    // 6. Process based on action type
     if (llmResponse?.action === 'store_answer' && llmResponse.storedQuestionId) {
         await processStoreAnswer(
             conversation,
@@ -124,18 +129,21 @@ export async function sendMessageWithBusinessLogic(
         );
     }
 
-    if (llmResponse?.completed) {
+    if (llmResponse?.action === 'request_confirmation') {
+        metadata.awaitingConfirmation = true;
+        logger.info(`Conversation ${conversationId} awaiting user confirmation`);
+    }
+
+    if (llmResponse?.action === 'complete' && llmResponse.completed) {
         await processCompletion(
             conversation,
-            llmResponse,
-            normalizedAttachmentIds,
             metadata
         );
     }
 
     await conversation.save();
 
-    // 6. Populate and return
+    // 7. Populate and return
     await conversation.populate('messages.attachments');
     await conversation.populate('customerId');
 
@@ -162,6 +170,15 @@ function prepareLLMMessage(userMessageText: string, attachmentIds: string[]): st
     return userMessageText
         ? `${userMessageText} [Attachment IDs: ${idList}]`
         : `[Attachment IDs: ${idList}]`;
+}
+
+function findLastAssistantMessage(messages: IMessage[]): IMessage | null {
+    for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === 'assistant') {
+            return messages[i];
+        }
+    }
+    return null;
 }
 
 async function getCustomerContext(customerId: any): Promise<string | null> {
@@ -239,6 +256,26 @@ function collectAllAnswersFromMessages(messages: IMessage[]): Record<string, any
     return collectedData;
 }
 
+// ==================== FILE FIELD DETECTION ====================
+
+function isFileField(type: string, questionId: string): boolean {
+    // Check by type
+    if (type === 'file' || type === 'files') {
+        return true;
+    }
+
+    // Check by field name patterns
+    const filePatterns = [
+        'photo', 'photos', 'image', 'images',
+        'attachment', 'attachments', 'upload', 'uploads',
+        'document', 'documents', 'file', 'files'
+    ];
+
+    return filePatterns.some(pattern =>
+        questionId.toLowerCase().includes(pattern)
+    );
+}
+
 // ==================== CORE PROCESSING ====================
 
 async function processStoreAnswer(
@@ -288,17 +325,17 @@ async function processStoreAnswer(
                 };
 
                 // Add attachments if any
-                // if (attachmentIdsToAdd.length > 0) {
-                //     const validIds = attachmentIdsToAdd
-                //         .filter(id => mongoose.Types.ObjectId.isValid(id))
-                //         .map(id => new mongoose.Types.ObjectId(id));
+                if (attachmentIdsToAdd.length > 0) {
+                    const validIds = attachmentIdsToAdd
+                        .filter(id => mongoose.Types.ObjectId.isValid(id))
+                        .map(id => new mongoose.Types.ObjectId(id));
 
-                //     if (validIds.length > 0) {
-                //         updateData.$addToSet = {
-                //             attachments: { $each: validIds }
-                //         };
-                //     }
-                // }
+                    if (validIds.length > 0) {
+                        updateData.$addToSet = {
+                            attachments: { $each: validIds }
+                        };
+                    }
+                }
 
                 customer = await Customer.findByIdAndUpdate(
                     customer._id,
@@ -353,34 +390,54 @@ async function processStoreAnswer(
         // Non-email field - update customer if customer exists
         if (conversation.customerId) {
             try {
-                const updateData: any = {
-                    $set: {
-                        [`profile.${storedQuestionId}`]: value,
-                        'meta.lastUpdated': new Date(),
-                        'meta.lastConversation': conversation._id.toString()
-                    }
-                };
+                // Check if this is a file field
+                const isFile = isFileField(fieldType, storedQuestionId);
 
-                // Handle attachments for file/files type
-                if (isFileField(fieldType, storedQuestionId) && attachmentIds.length > 0) {
-                    const validIds = attachmentIds
-                        .filter(id => mongoose.Types.ObjectId.isValid(id))
-                        .map(id => new mongoose.Types.ObjectId(id));
+                if (isFile) {
+                    // For file fields, only update attachments array, NOT profile
+                    const fileIds = extractAttachmentIdsFromValue(value);
 
-                    if (validIds.length > 0) {
-                        updateData.$addToSet = {
-                            attachments: { $each: validIds }
-                        };
+                    if (fileIds.length > 0) {
+                        const validIds = fileIds
+                            .filter(id => mongoose.Types.ObjectId.isValid(id))
+                            .map(id => new mongoose.Types.ObjectId(id));
+
+                        if (validIds.length > 0) {
+                            await Customer.findByIdAndUpdate(
+                                conversation.customerId,
+                                {
+                                    $addToSet: {
+                                        attachments: { $each: validIds }
+                                    },
+                                    $set: {
+                                        'meta.lastUpdated': new Date(),
+                                        'meta.lastConversation': conversation._id.toString()
+                                    }
+                                },
+                                { new: true, runValidators: true }
+                            );
+
+                            logger.info(`Added ${validIds.length} attachments for field ${storedQuestionId}`);
+                        }
                     }
+                } else {
+                    // For non-file fields, update profile
+                    const updateData: any = {
+                        $set: {
+                            [`profile.${storedQuestionId}`]: value,
+                            'meta.lastUpdated': new Date(),
+                            'meta.lastConversation': conversation._id.toString()
+                        }
+                    };
+
+                    await Customer.findByIdAndUpdate(
+                        conversation.customerId,
+                        updateData,
+                        { new: true, runValidators: true }
+                    );
+
+                    logger.info(`Updated customer ${conversation.customerId} field: ${storedQuestionId}`);
                 }
-
-                await Customer.findByIdAndUpdate(
-                    conversation.customerId,
-                    updateData,
-                    { new: true, runValidators: true }
-                );
-
-                logger.info(`Updated customer ${conversation.customerId} field: ${storedQuestionId}`);
             } catch (error: any) {
                 logger.error(`Failed to update customer field ${storedQuestionId}: ${error.message}`);
             }
@@ -393,15 +450,8 @@ async function processStoreAnswer(
 
 async function processCompletion(
     conversation: IConversation,
-    llmResponse: any,
-    attachmentIds: string[],
     metadata: any
 ): Promise<void> {
-    // Store final field if present
-    if (llmResponse.storedQuestionId && llmResponse.value !== null && llmResponse.value !== undefined) {
-        await processStoreAnswer(conversation, llmResponse, attachmentIds, metadata);
-    }
-
     // Ensure customer exists before closing
     if (!conversation.customerId) {
         // Try to create customer from collected data
@@ -481,7 +531,7 @@ function buildProfileFromAnswers(answers: Record<string, any>): Record<string, a
 
         if (value === null || value === undefined) return;
 
-        // Skip file fields - they go to attachments array
+        // Skip file fields - they go to attachments array ONLY
         if (isFileField(type, questionId)) {
             return;
         }
@@ -538,17 +588,6 @@ function extractAttachmentIdsFromValue(value: any): string[] {
 }
 
 // ==================== UTILITIES ====================
-
-function isFileField(type: string, questionId: string): boolean {
-    return type === 'file' ||
-        type === 'files' ||
-        questionId === 'attachments' ||
-        questionId.includes('photo') ||
-        questionId.includes('photos') ||
-        questionId.includes('upload') ||
-        questionId.includes('attachment') ||
-        questionId.includes('document');
-}
 
 async function sendEmailSafe(emailFn: Function, ...args: any[]): Promise<void> {
     if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {

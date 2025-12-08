@@ -214,17 +214,17 @@ export const FORM_JSON2 = {
       },
       "context": "Used for personalization and official documentation",
     },
-    {
-      "order": 2,
-      "id": "phone",
-      "type": "text",
-      "required": true,
-      "placeholder": "+91XXXXXXXXXX",
-      "validation": {
-        "pattern": "^\\+?[0-9]{7,15}$",
-      },
-      "context": "For installation coordination and updates",
-    },
+    // {
+    //   "order": 2,
+    //   "id": "phone",
+    //   "type": "text",
+    //   "required": true,
+    //   "placeholder": "+91XXXXXXXXXX",
+    //   "validation": {
+    //     "pattern": "^\\+?[0-9]{7,15}$",
+    //   },
+    //   "context": "For installation coordination and updates",
+    // },
     {
       "order": 3,
       "id": "number_of_solar_panels",
@@ -573,19 +573,19 @@ export const FORM_JSON2 = {
         }
       ],
     },
-    {
-      "order": 9,
-      "id": "panel_company_name",
-      "type": "text",
-      "required": false,
-      "placeholder": "e.g., Sunpower, Tesla, etc.",
-      "validation": {
-        "minLength": 3,
-        "maxLength": 120,
-        "pattern": "^[a-zA-Z\\s]+$",
-      },
-      "context": "Optional but highly recommended for precise quotes. Which helps us to identify the panel company and their products",
-    }
+    // {
+    //   "order": 9,
+    //   "id": "panel_company_name",
+    //   "type": "text",
+    //   "required": false,
+    //   "placeholder": "e.g., Sunpower, Tesla, etc.",
+    //   "validation": {
+    //     "minLength": 3,
+    //     "maxLength": 120,
+    //     "pattern": "^[a-zA-Z\\s]+$",
+    //   },
+    //   "context": "Optional but highly recommended for precise quotes. Which helps us to identify the panel company and their products",
+    // }
   ],
 
   "completion": {
