@@ -4,9 +4,8 @@ import { IFormConfig } from '../interfaces';
 
 interface CreateFormConfigParams {
   name: string;
-  slug: string;
+  welcomeMessage: string;
   description?: string;
-  version: number;
   formJson: any;
   createdBy?: string;
   isActive?: boolean;
@@ -18,9 +17,8 @@ export async function createFormConfig(
   try {
     const formConfig = new FormConfig({
       name: params.name,
-      slug: params.slug,
+      welcomeMessage: params.welcomeMessage,
       description: params.description,
-      version: params.version,
       formJson: params.formJson,
       createdBy: params.createdBy,
       isActive: params.isActive !== undefined ? params.isActive : true,

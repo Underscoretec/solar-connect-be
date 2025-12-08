@@ -16,9 +16,8 @@ router.post("/", async (req, res) => {
   try {
     const formConfig = await controllers.createFormConfig({
       name: req.body.name,
-      slug: req.body.slug,
+      welcomeMessage: req.body.welcomeMessage,
       description: req.body.description,
-      version: req.body.version,
       formJson: req.body.formJson,
       createdBy: req.body.createdBy,
       isActive: req.body.isActive,
@@ -134,9 +133,8 @@ router.put("/:id", async (req, res) => {
   try {
     const formConfig = await controllers.updateFormConfig(req.params.id, {
       name: req.body.name,
-      slug: req.body.slug,
+      welcomeMessage: req.body.welcomeMessage,
       description: req.body.description,
-      version: req.body.version,
       formJson: req.body.formJson,
       isActive: req.body.isActive,
     });
