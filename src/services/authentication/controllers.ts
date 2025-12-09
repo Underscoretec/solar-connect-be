@@ -237,4 +237,55 @@ export async function getUser(req: request): Promise<any> {
     });
 }
 
+export async function updatePassword(req: request): Promise<any> {
+    const { currentPassword, newPassword } = req?.body;
+    logger.info(`[Auth] Update password API called for user: ${req.user?.email}`);
+
+    return new Promise<any>(async function (resolve, reject) {
+        try {
+            if (!currentPassword || !newPassword) {
+                return reject(projection.errorAPIResponse(null, 400, "INVALID_INPUT", "Current password and new password are required"));
+            }
+
+            // User is already attached to request by isValidToken middleware
+            const user = req.user;
+
+            if (!user) {
+                return reject(projection.errorAPIResponse(null, 401, "UNAUTHORIZED", messages["UNAUTHORIZED"]));
+            }
+
+            // Verify current password
+            const isPasswordValid = await bcrypt.compare(currentPassword, user.password || '');
+
+            if (!isPasswordValid) {
+                return reject(projection.errorAPIResponse(null, 401, "INVALID_PASSWORD", "Current password is incorrect"));
+            }
+
+            // Validate new password
+            const validPassword = await passwordValidation(newPassword);
+
+            if (typeof validPassword !== "string") {
+                return reject(projection.validationError(validPassword as any));
+            }
+
+            // Update password
+            await Users.findByIdAndUpdate(user._id, {
+                password: validPassword,
+                updatedAt: Date.now()
+            });
+
+            return resolve({
+                statusCode: 200,
+                error: false,
+                result: null,
+                code: "PASSWORD_UPDATED",
+                message: "Password updated successfully",
+            });
+        } catch (error) {
+            logger.error(`[Auth] Error when updating password`, error);
+            return reject(projection.errorResponse(error));
+        }
+    });
+}
+
 

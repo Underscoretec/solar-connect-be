@@ -14,6 +14,4 @@ const FormConfigSchema = new Schema<IFormConfig>(
   { timestamps: true }
 );
 
-// Compound index
-FormConfigSchema.index({ slug: 1 });
 export default model<IFormConfig>('FormConfig', FormConfigSchema);

@@ -3,6 +3,7 @@ import projection from "../projection";
 import messages from "../messages.json";
 import * as controllers from "./controllers";
 import { WELCOME_MESSAGE } from "../../prompts/welcomeMessage";
+import isValidToken from "../../middleware/isValidToken";
 
 const router = express.Router();
 
@@ -90,7 +91,7 @@ router.get("/:id", async (req, res) => {
  * @desc - Get conversations list
  * @access - Public
  */
-router.get("/", async (req, res) => {
+router.get("/", isValidToken as any, async (req, res) => {
     try {
         const { conversations, total } = await controllers.getConversationsList({
             page: parseInt(req.query.page as string) || 1,
@@ -238,7 +239,7 @@ router.post('/:id/message', async (req, res) => {
  * @desc - Get dashboard statistics
  * @access - Public
  */
-router.get("/stats/dashboard", async (req, res) => {
+router.get("/stats/dashboard", isValidToken as any, async (req, res) => {
     try {
         const stats = await controllers.getDashboardStats();
 

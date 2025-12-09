@@ -203,7 +203,8 @@ export const FORM_JSON2 = {
   "flow": [
     {
       "order": 1,
-      "id": "full_name",
+      "id": "1",
+      "questionId": "full_name",
       "type": "text",
       "required": true,
       "placeholder": "e.g., Rajesh Kumar",
@@ -214,20 +215,22 @@ export const FORM_JSON2 = {
       },
       "context": "Used for personalization and official documentation",
     },
-    // {
-    //   "order": 2,
-    //   "id": "phone",
-    //   "type": "text",
-    //   "required": true,
-    //   "placeholder": "+91XXXXXXXXXX",
-    //   "validation": {
-    //     "pattern": "^\\+?[0-9]{7,15}$",
-    //   },
-    //   "context": "For installation coordination and updates",
-    // },
+    {
+      "order": 2,
+      "id": "2",
+      "questionId": "phone",
+      "type": "text",
+      "required": true,
+      "placeholder": "+91XXXXXXXXXX",
+      "validation": {
+        "pattern": "^\\+?[0-9]{7,15}$",
+      },
+      "context": "For installation coordination and updates",
+    },
     {
       "order": 3,
-      "id": "number_of_solar_panels",
+      "id": "3",
+      "questionId": "number_of_solar_panels",
       "type": "text",
       "required": true,
       "placeholder": "1, 2, 3, 4, 5, 6, 7, 8, 9, 10",
@@ -235,7 +238,8 @@ export const FORM_JSON2 = {
     },
     {
       "order": 4,
-      "id": "email",
+      "id": "4",
+      "questionId": "email",
       "type": "text",
       "required": true,
       "placeholder": "you@example.com",
@@ -246,13 +250,15 @@ export const FORM_JSON2 = {
     },
     {
       "order": 5,
-      "id": "address",
+      "id": "5",
+      "questionId": "address",
       "type": "form",
       "required": true,
       "placeholder": "e.g., 123 Street, Bangalore, 560001",
       "children": [
         {
-          "id": "address_line",
+          "id": "6",
+          "questionId": "address_line",
           "type": "text",
           "placeholder": "Street, city",
           "required": true,
@@ -262,13 +268,15 @@ export const FORM_JSON2 = {
           },
         },
         {
-          "id": "address_line_2",
+          "id": "7",
+          "questionId": "address_line_2",
           "type": "text",
           "placeholder": "Apartment, suite, etc.",
           "required": false,
         },
         {
-          "id": "pin_code",
+          "id": "8",
+          "questionId": "pin_code",
           "type": "text",
           "placeholder": "560001",
           "required": true,
@@ -277,7 +285,8 @@ export const FORM_JSON2 = {
           },
         },
         {
-          "id": "city",
+          "id": "9",
+          "questionId": "city",
           "type": "text",
           "placeholder": "Bangalore",
           "required": true,
@@ -286,7 +295,8 @@ export const FORM_JSON2 = {
           },
         },
         {
-          "id": "state",
+          "id": "10",
+          "questionId": "state",
           "type": "text",
           "placeholder": "Karnataka",
           "required": true,
@@ -295,7 +305,8 @@ export const FORM_JSON2 = {
           },
         },
         {
-          "id": "address_country",
+          "id": "11",
+          "questionId": "address_country",
           "type": "text",
           "placeholder": "India",
           "required": false,
@@ -308,7 +319,8 @@ export const FORM_JSON2 = {
     },
     {
       "order": 6,
-      "id": "nets_interest",
+      "id": "12",
+      "questionId": "nets_interest",
       "type": "choice",
       "required": true,
       "placeholder": "Yes or No",
@@ -321,7 +333,8 @@ export const FORM_JSON2 = {
     },
     {
       "order": 7,
-      "id": "service_type",
+      "id": "13",
+      "questionId": "service_type",
       "type": "choice",
       "required": true,
       "placeholder": "What do you need help with?",
@@ -335,7 +348,8 @@ export const FORM_JSON2 = {
       "optionFlows": {
         "install": [
           {
-            "id": "own_home",
+            "id": "14",
+            "questionId": "own_home",
             "type": "choice",
             "required": true,
             "placeholder": "Do you own your home?",
@@ -347,7 +361,8 @@ export const FORM_JSON2 = {
             "context": "Ownership affects eligibility and financing options"
           },
           {
-            "id": "monthly_bill",
+            "id": "15",
+            "questionId": "monthly_bill",
             "type": "choice",
             "required": true,
             "placeholder": "What's your average monthly electric bill?",
@@ -361,7 +376,8 @@ export const FORM_JSON2 = {
             "context": "Used to estimate system size and savings"
           },
           {
-            "id": "battery_interest",
+            "id": "16",
+            "questionId": "battery_interest",
             "type": "choice",
             "required": false,
             "placeholder": "Are you interested in a battery backup?",
@@ -374,7 +390,8 @@ export const FORM_JSON2 = {
             "context": "Helps us include battery options in your quote"
           },
           {
-            "id": "install_photos",
+            "id": "17",
+            "questionId": "install_photos",
             "type": "files",
             "required": false,
             "placeholder": "Upload photos of your roof / meter area (optional)",
@@ -402,7 +419,8 @@ export const FORM_JSON2 = {
 
         "bird_proofing": [
           {
-            "id": "bird_activity",
+            "id": "18",
+            "questionId": "bird_activity",
             "type": "choice",
             "required": true,
             "placeholder": "How is the bird activity on your roof?",
@@ -414,7 +432,8 @@ export const FORM_JSON2 = {
             "context": "Understanding the severity helps choose the right netting solution"
           },
           {
-            "id": "panel_count_range",
+            "id": "19",
+            "questionId": "panel_count_range",
             "type": "choice",
             "required": false,
             "placeholder": "How many solar panels do you have?",
@@ -427,7 +446,8 @@ export const FORM_JSON2 = {
             "context": "Used for estimating material and labour"
           },
           {
-            "id": "roof_type",
+            "id": "20",
+            "questionId": "roof_type",
             "type": "choice",
             "required": false,
             "placeholder": "What type of roof do you have?",
@@ -441,14 +461,16 @@ export const FORM_JSON2 = {
             "context": "Different roofs may need different mounting methods"
           },
           {
-            "id": "bird_issue_photos",
+            "id": "21",
+            "questionId": "bird_issue_photos",
             "type": "files",
             "required": false,
             "placeholder": "Upload photos showing bird issues or panel area (optional)",
             "context": "Photos help us understand where nets are needed",
             "children": [
               {
-                "id": "panel_area_photos",
+                "id": "22",
+                "questionId": "panel_area_photos",
                 "type": "file",
                 "required": false,
                 "accept": ["image/*"],
@@ -456,7 +478,8 @@ export const FORM_JSON2 = {
                 "maxSize": "10MB"
               },
               {
-                "id": "bird_nesting_photos",
+                "id": "23",
+                "questionId": "bird_nesting_photos",
                 "type": "file",
                 "required": false,
                 "accept": ["image/*"],
@@ -469,7 +492,8 @@ export const FORM_JSON2 = {
 
         "cleaning_repair": [
           {
-            "id": "issue_type",
+            "id": "24",
+            "questionId": "issue_type",
             "type": "choice",
             "required": true,
             "placeholder": "What seems to be the issue?",
@@ -483,7 +507,8 @@ export const FORM_JSON2 = {
             "context": "Helps us route your request to the right technician"
           },
           {
-            "id": "urgency",
+            "id": "25",
+            "questionId": "urgency",
             "type": "choice",
             "required": false,
             "placeholder": "How urgent is it?",
@@ -495,21 +520,24 @@ export const FORM_JSON2 = {
             "context": "Helps us prioritize scheduling"
           },
           {
-            "id": "issue_description",
+            "id": "26",
+            "questionId": "issue_description",
             "type": "text",
             "required": false,
             "placeholder": "Describe the issue briefly (optional)",
             "context": "Any extra detail helps our team prepare before contacting you"
           },
           {
-            "id": "issue_photos",
+            "id": "27",
+            "questionId": "issue_photos",
             "type": "files",
             "required": false,
             "placeholder": "Upload photos of the issue (optional)",
             "context": "Photos make it easier to diagnose problems before the visit",
             "children": [
               {
-                "id": "panel_issue_photos",
+                "id": "28",
+                "questionId": "panel_issue_photos",
                 "type": "file",
                 "required": false,
                 "accept": ["image/*"],
@@ -522,7 +550,8 @@ export const FORM_JSON2 = {
 
         "guidance": [
           {
-            "id": "guidance_description",
+            "id": "29",
+            "questionId": "guidance_description",
             "type": "text",
             "required": false,
             "placeholder": "Tell us a bit about your home and what you're thinking (optional)",
@@ -533,14 +562,16 @@ export const FORM_JSON2 = {
     },
     {
       "order": 8,
-      "id": "attachments",
+      "id": "30",
+      "questionId": "attachments",
       "type": "files",
       "required": false,
       "placeholder": "Upload photos of your site, roof, and angles",
       "context": "Optional but highly recommended for precise quotes",
       "children": [
         {
-          "id": "site_photos",
+          "id": "31",
+          "questionId": "site_photos",
           "type": "file",
           "required": false,
           "accept": ["image/*"],
@@ -548,7 +579,8 @@ export const FORM_JSON2 = {
           "maxSize": "10MB",
         },
         {
-          "id": "roof_photos",
+          "id": "32",
+          "questionId": "roof_photos",
           "type": "file",
           "required": false,
           "accept": ["image/*"],
@@ -556,7 +588,8 @@ export const FORM_JSON2 = {
           "maxSize": "10MB",
         },
         {
-          "id": "angle_photos",
+          "id": "33",
+          "questionId": "angle_photos",
           "type": "file",
           "required": false,
           "accept": ["image/*"],
@@ -564,7 +597,8 @@ export const FORM_JSON2 = {
           "maxSize": "10MB",
         },
         {
-          "id": "panel_photos",
+          "id": "34",
+          "questionId": "panel_photos",
           "type": "file",
           "required": false,
           "accept": ["image/*"],
@@ -573,19 +607,20 @@ export const FORM_JSON2 = {
         }
       ],
     },
-    // {
-    //   "order": 9,
-    //   "id": "panel_company_name",
-    //   "type": "text",
-    //   "required": false,
-    //   "placeholder": "e.g., Sunpower, Tesla, etc.",
-    //   "validation": {
-    //     "minLength": 3,
-    //     "maxLength": 120,
-    //     "pattern": "^[a-zA-Z\\s]+$",
-    //   },
-    //   "context": "Optional but highly recommended for precise quotes. Which helps us to identify the panel company and their products",
-    // }
+    {
+      "order": 9,
+      "id": "35",
+      "questionId": "panel_company_name",
+      "type": "text",
+      "required": false,
+      "placeholder": "e.g., Sunpower, Tesla, etc.",
+      "validation": {
+        "minLength": 3,
+        "maxLength": 120,
+        "pattern": "^[a-zA-Z\\s]+$",
+      },
+      "context": "Optional but highly recommended for precise quotes. Which helps us to identify the panel company and their products",
+    }
   ],
 
   "completion": {

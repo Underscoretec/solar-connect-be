@@ -19,9 +19,21 @@ export async function createFormConfig(
   params: CreateFormConfigParams
 ): Promise<IFormConfig> {
   try {
-    // Merge completion settings into formJson if provided
+    // Handle formJson - it might be a string (minified) or an object
     let formJson = params.formJson;
-    if (params.completionMessage || params.completionActions || params.completionType) {
+
+    // If formJson is a string, parse it first
+    if (typeof formJson === 'string') {
+      try {
+        formJson = JSON.parse(formJson);
+      } catch (e) {
+        // If parsing fails, use as-is (will be stored as string)
+        logger.warn(`Failed to parse formJson string: ${e}`);
+      }
+    }
+
+    // Merge completion settings into formJson if provided and formJson is an object
+    if (typeof formJson === 'object' && formJson !== null && (params.completionMessage || params.completionActions || params.completionType)) {
       formJson = {
         ...formJson,
         completion: {
@@ -30,6 +42,24 @@ export async function createFormConfig(
           type: params.completionType || formJson.completion?.type || "summary",
         },
       };
+      // Re-stringify if it was originally a string (minify)
+      if (typeof params.formJson === 'string') {
+        formJson = JSON.stringify(formJson);
+      }
+    }
+
+    // Check if there's already an active form config
+    const activeFormConfig = await FormConfig.findOne({ isActive: true });
+    const shouldBeActive = params.isActive !== undefined
+      ? params.isActive
+      : !activeFormConfig; // Default to true only if no active form exists
+
+    // If enabling this form, disable all other forms
+    if (shouldBeActive) {
+      await FormConfig.updateMany(
+        { isActive: true },
+        { $set: { isActive: false } }
+      );
     }
 
     const formConfig = new FormConfig({
@@ -39,7 +69,7 @@ export async function createFormConfig(
       description: params.description,
       formJson: formJson,
       createdBy: params.createdBy,
-      isActive: params.isActive !== undefined ? params.isActive : true,
+      isActive: shouldBeActive,
     });
 
     await formConfig.save();
@@ -71,15 +101,6 @@ export async function getFormConfigByLocale(): Promise<IFormConfig | null> {
   }
 }
 
-export async function getFormConfigBySlug(slug: string): Promise<IFormConfig | null> {
-  try {
-    const formConfig = await FormConfig.findOne({ slug, isActive: true });
-    return formConfig;
-  } catch (error: any) {
-    logger.error(`Error getting form config by slug: ${error.message}`);
-    throw error;
-  }
-}
 
 export async function getFormConfigsList(params: {
   page?: number;
@@ -108,6 +129,7 @@ export async function getFormConfigsList(params: {
 
     const [formConfigs, total] = await Promise.all([
       FormConfig.find(query)
+        .select('-formJson') // Exclude formJson from list
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit),
@@ -132,9 +154,21 @@ export async function updateFormConfig(
       return null;
     }
 
-    // Merge completion settings into formJson if provided
+    // Handle formJson - it might be a string (minified) or an object
     let formJson = updates.formJson !== undefined ? updates.formJson : existingConfig.formJson;
-    if (updates.completionMessage || updates.completionActions || updates.completionType) {
+
+    // If formJson is a string, parse it first
+    if (typeof formJson === 'string') {
+      try {
+        formJson = JSON.parse(formJson);
+      } catch (e) {
+        // If parsing fails, use as-is
+        logger.warn(`Failed to parse formJson string: ${e}`);
+      }
+    }
+
+    // Merge completion settings into formJson if provided and formJson is an object
+    if (typeof formJson === 'object' && formJson !== null && (updates.completionMessage || updates.completionActions || updates.completionType)) {
       formJson = {
         ...formJson,
         completion: {
@@ -149,6 +183,10 @@ export async function updateFormConfig(
             : (formJson.completion?.type || "summary"),
         },
       };
+      // Re-stringify if it was originally a string (minify)
+      if (typeof updates.formJson === 'string' || typeof existingConfig.formJson === 'string') {
+        formJson = JSON.stringify(formJson);
+      }
     }
 
     const updateData: any = {
@@ -180,6 +218,35 @@ export async function deleteFormConfig(id: string): Promise<boolean> {
     return !!result;
   } catch (error: any) {
     logger.error(`Error deleting form config: ${error.message}`);
+    throw error;
+  }
+}
+
+export async function toggleFormConfigActive(id: string): Promise<IFormConfig | null> {
+  try {
+    const formConfig = await FormConfig.findById(id);
+    if (!formConfig) {
+      return null;
+    }
+
+    const newActiveStatus = !formConfig.isActive;
+
+    // If enabling this form, disable all other forms
+    if (newActiveStatus) {
+      await FormConfig.updateMany(
+        { _id: { $ne: id } },
+        { $set: { isActive: false } }
+      );
+    }
+
+    // Update this form's active status
+    formConfig.isActive = newActiveStatus;
+    await formConfig.save();
+
+    logger.info(`Form config ${id} active status toggled to ${newActiveStatus}`);
+    return formConfig;
+  } catch (error: any) {
+    logger.error(`Error toggling form config active status: ${error.message}`);
     throw error;
   }
 }

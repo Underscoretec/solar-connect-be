@@ -76,5 +76,22 @@ router.get("/user", isValidToken as any, async (req: Request, res: Response) => 
         });
 });
 
+/**
+ * @type - PUT
+ * @route -  /api/auth/password
+ * @desc - route for update password
+ * @access - Private (requires valid token)
+ */
+router.put("/password", isValidToken as any, async (req: Request, res: Response) => {
+    controllers
+        .updatePassword(req as request)
+        .then((response: any) => {
+            return res.status(response.statusCode).send(response);
+        })
+        .catch((err) => {
+            return res.status(err.status || 500).send(err);
+        });
+});
+
 export default router;
 

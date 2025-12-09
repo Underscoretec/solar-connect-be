@@ -3,6 +3,7 @@ import { request, response } from "../interfaces";
 import projection from "../projection";
 import messages from "../messages.json";
 import * as controllers from "./controllers";
+import isValidToken from "../../middleware/isValidToken";
 
 const router = express.Router();
 
@@ -10,9 +11,9 @@ const router = express.Router();
  * @type - POST
  * @route -  /api/form-configs
  * @desc - Create form config
- * @access - Public
+ * @access - Private
  */
-router.post("/", async (req, res) => {
+router.post("/", isValidToken as any, async (req, res) => {
   try {
     const formConfig = await controllers.createFormConfig({
       title: req.body.title,
@@ -44,9 +45,9 @@ router.post("/", async (req, res) => {
  * @type - GET
  * @route -  /api/form-configs/:id
  * @desc - Get form config by ID
- * @access - Public
+ * @access - Private
  */
-router.get("/:id", async (req, res) => {
+router.get("/:id", isValidToken as any, async (req, res) => {
   try {
     const formConfig = await controllers.getFormConfigById(req.params.id);
 
@@ -71,17 +72,17 @@ router.get("/:id", async (req, res) => {
 
 /**
  * @type - GET
- * @route -  /api/form-configs/slug/:slug
- * @desc - Get form config by slug
+ * @route -  /api/form-configs/active
+ * @desc - Get active form config (public endpoint for chat)
  * @access - Public
  */
-router.get("/slug/:slug", async (req, res) => {
+router.get("/active", async (req, res) => {
   try {
-    const formConfig = await controllers.getFormConfigBySlug(req.params.slug);
+    const formConfig = await controllers.getFormConfigByLocale();
 
     if (!formConfig) {
       return res.status(404).send(
-        projection.errorAPIResponse(null, 404, "FORM_CONFIG_NOT_FOUND", "Form configuration not found")
+        projection.errorAPIResponse(null, 404, "FORM_CONFIG_NOT_FOUND", "No active form configuration found")
       );
     }
 
@@ -90,7 +91,7 @@ router.get("/slug/:slug", async (req, res) => {
         formConfig,
         200,
         "FORM_CONFIG_FOUND",
-        "Form configuration found"
+        "Active form configuration found"
       )
     );
   } catch (err: any) {
@@ -102,9 +103,9 @@ router.get("/slug/:slug", async (req, res) => {
  * @type - GET
  * @route -  /api/form-configs
  * @desc - Get form configs list
- * @access - Public
+ * @access - Private
  */
-router.get("/", async (req, res) => {
+router.get("/", isValidToken as any, async (req, res) => {
   try {
     const { formConfigs, total } = await controllers.getFormConfigsList({
       page: parseInt(req.query.page as string) || 1,
@@ -131,9 +132,9 @@ router.get("/", async (req, res) => {
  * @type - PUT
  * @route -  /api/form-configs/:id
  * @desc - Update form config
- * @access - Public
+ * @access - Private
  */
-router.put("/:id", async (req, res) => {
+router.put("/:id", isValidToken as any, async (req, res) => {
   try {
     const formConfig = await controllers.updateFormConfig(req.params.id, {
       title: req.body.title,
@@ -170,9 +171,9 @@ router.put("/:id", async (req, res) => {
  * @type - DELETE
  * @route -  /api/form-configs/:id
  * @desc - Delete form config
- * @access - Public
+ * @access - Private
  */
-router.delete("/:id", async (req, res) => {
+router.delete("/:id", isValidToken as any, async (req, res) => {
   try {
     const deleted = await controllers.deleteFormConfig(req.params.id);
 
@@ -188,6 +189,35 @@ router.delete("/:id", async (req, res) => {
         200,
         "FORM_CONFIG_DELETED",
         "Form configuration deleted successfully"
+      )
+    );
+  } catch (err: any) {
+    return res.status(500).send(projection.errorAPIResponse(null, 500, "INTERNAL_SERVER_ERROR", err.message));
+  }
+});
+
+/**
+ * @type - PUT
+ * @route -  /api/form-configs/:id/toggle-active
+ * @desc - Toggle form config active status
+ * @access - Private
+ */
+router.put("/:id/toggle-active", isValidToken as any, async (req, res) => {
+  try {
+    const formConfig = await controllers.toggleFormConfigActive(req.params.id);
+
+    if (!formConfig) {
+      return res.status(404).send(
+        projection.errorAPIResponse(null, 404, "FORM_CONFIG_NOT_FOUND", "Form configuration not found")
+      );
+    }
+
+    return res.status(200).send(
+      projection.successResponse(
+        formConfig,
+        200,
+        "FORM_CONFIG_TOGGLED",
+        "Form configuration active status updated successfully"
       )
     );
   } catch (err: any) {

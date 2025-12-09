@@ -3,6 +3,7 @@ import { request, response } from "../interfaces";
 import projection from "../projection";
 import messages from "../messages.json";
 import * as controllers from "./controllers";
+import isValidToken from "../../middleware/isValidToken";
 
 const router = express.Router();
 
@@ -12,7 +13,7 @@ const router = express.Router();
  * @desc - Create or update customer
  * @access - Public
  */
-router.post("/", async (req, res) => {
+router.post("/", isValidToken as any, async (req, res) => {
     try {
         const customer = await controllers.createOrUpdateCustomer({
             name: req.body.name,
@@ -43,7 +44,7 @@ router.post("/", async (req, res) => {
  * @desc - Get customer by ID
  * @access - Public
  */
-router.get("/:id", async (req, res) => {
+router.get("/:id", isValidToken as any, async (req, res) => {
     try {
         const customer = await controllers.getCustomerById(req.params.id);
 
@@ -72,7 +73,7 @@ router.get("/:id", async (req, res) => {
  * @desc - Get customers list
  * @access - Public
  */
-router.get("/", async (req, res) => {
+router.get("/", isValidToken as any, async (req, res) => {
     try {
         const { customers, total } = await controllers.getCustomersList({
             page: parseInt(req.query.page as string) || 1,
@@ -101,7 +102,7 @@ router.get("/", async (req, res) => {
  * @desc - Update customer profile
  * @access - Public
  */
-router.put("/:id/profile", async (req, res) => {
+router.put("/:id/profile", isValidToken as any, async (req, res) => {
     try {
         const customer = await controllers.updateCustomerProfile(
             req.params.id,
