@@ -1,7 +1,7 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import OpenAI from "openai";
 import { FORM_JSON, FORM_JSON2 } from "../prompts/formJson";
-import { SYSTEM_PROMPT_FINAL, SYSTEM_PROMPT_V2 } from "../prompts/systemPrompt";
+import { SYSTEM_PROMPT_V2 } from "../prompts/systemPrompt";
 import config from "../config";
 import logger from "../services/logger";
 import { parseGeminiOutput } from "./helpers";
@@ -100,81 +100,84 @@ export async function callGemini(
  * Call OpenAI LLM with conversation history
  * Returns response in the same format as Gemini
  */
-// export async function callOpenAI(
-//   historyMessages: any[],
-//   userMessage: string
-// ): Promise<string> {
-//   const systemPrompt = SYSTEM_PROMPT;
-//   const formJson = FORM_JSON;
+export async function callOpenAI(
+  historyMessages: any[],
+  userMessage: string
+): Promise<any> {
+  const systemPrompt = SYSTEM_PROMPT_V2;
+  const formJson = FORM_JSON2;
 
-//   try {
-//     // Check if OpenAI API key is configured
-//     const openaiApiKey = process.env.OPENAI_API_KEY;
-//     if (!openaiApiKey) {
-//       throw new Error('OPENAI_API_KEY not configured in environment variables');
-//     }
+  try {
+    // Check if OpenAI API key is configured
+    const openaiApiKey = process.env.OPENAI_API_KEY;
+    if (!openaiApiKey) {
+      throw new Error('OPENAI_API_KEY not configured in environment variables');
+    }
 
-//     const openai = new OpenAI({
-//       apiKey: openaiApiKey,
-//     });
+    const openai = new OpenAI({
+      apiKey: openaiApiKey,
+    });
 
-//     const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [];
+    const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [];
 
-//     // Add system message with form configuration
-//     messages.push({
-//       role: 'system',
-//       content: `${systemPrompt}\n\n[FORM CONFIGURATION]\n${JSON.stringify(formJson, null, 2)}\n\nFollow this configuration strictly for data collection.`
-//     });
+    // Add system message with form configuration
+    messages.push({
+      role: 'system',
+      content: `${systemPrompt}`
+    });
 
-//     // Inject form acknowledgment
-//     messages.push({
-//       role: 'user',
-//       content: `[FORM CONFIGURATION]\n${JSON.stringify(formJson, null, 2)}\n\nFollow this configuration strictly for data collection.`
-//     });
+    // Inject form acknowledgment
+    messages.push({
+      role: 'user',
+      content: `[FORM CONFIGURATION]\n${JSON.stringify(formJson)}\n\nFollow this configuration strictly for data collection.`
+    });
 
-//     messages.push({
-//       role: 'assistant',
-//       content: 'Understood. I will follow the form configuration precisely and return responses in the specified JSON format.'
-//     });
+    messages.push({
+      role: 'assistant',
+      content: 'Understood. I will follow the form configuration precisely and return responses in the specified JSON format.'
+    });
 
-//     // Add conversation history
-//     historyMessages.forEach(msg => {
-//       if (msg.role === 'user' || msg.role === 'assistant') {
-//         messages.push({
-//           role: msg.role,
-//           content: msg.text || ''
-//         });
-//       }
-//     });
+    // Add conversation history
+    historyMessages.forEach(msg => {
+      if (msg.role === 'user' || msg.role === 'assistant') {
+        messages.push({
+          role: msg.role,
+          content: msg.text || ''
+        });
+      }
+    });
 
-//     // Add current user message
-//     messages.push({
-//       role: 'user',
-//       content: userMessage
-//     });
+    // Add current user message
+    messages.push({
+      role: 'user',
+      content: userMessage
+    });
 
-//     const openaiModel = process.env.OPENAI_MODEL || 'gpt-4o';
+    const openaiModel = process.env.OPENAI_MODEL || 'gpt-4o';
 
-//     const completion = await openai.chat.completions.create({
-//       model: openaiModel,
-//       messages: messages,
-//       temperature: 0.7,
-//       max_tokens: 2048,
-//       top_p: 0.95,
-//     });
+    const completion = await openai.chat.completions.create({
+      model: openaiModel,
+      messages: messages,
+      temperature: 0.7,
+      max_tokens: 2048,
+      top_p: 0.95,
+      response_format: { type: "json_object" },
+    });
 
-//     const text = completion.choices[0]?.message?.content || '';
+    const text = completion.choices[0]?.message?.content || '';
 
-//     if (!text) {
-//       throw new Error('OpenAI returned empty response');
-//     }
 
-//     logger.info(`✅ OpenAI response generated (${text.length} chars)`);
+    if (!text) {
+      throw new Error('OpenAI returned empty response');
+    }
+    const parsedText = parseGeminiOutput(text);
 
-//     return text;
-//   } catch (error: any) {
-//     logger.error(`❌ OpenAI API call failed: ${error.message}`);
-//     throw new Error(`Failed to call OpenAI API: ${error.message}`);
-//   }
-// }
+    logger.info(`✅ OpenAI response generated (${text.length} chars)`);
+
+    return parsedText;
+  } catch (error: any) {
+    logger.error(`❌ OpenAI API call failed: ${error.message}`);
+    throw new Error(`Failed to call OpenAI API: ${error.message}`);
+  }
+}
 

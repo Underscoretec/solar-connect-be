@@ -637,11 +637,6 @@ export const FORM_JSON2 = {
 
 
 export const FORM_JSON3 = {
-  "id": "solar_onboarding_v1",
-  "title": "Solar Connect Onboarding",
-  "version": 1,
-  "locale": "en-IN",
-  "description": "Structured data collection for solar panel installation",
   "flow": [
     {
       "order": 1,
@@ -1045,3 +1040,7 @@ export const FORM_JSON3 = {
     "type": "summary"
   }
 };
+
+
+
+
