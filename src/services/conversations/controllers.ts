@@ -96,17 +96,14 @@ export async function sendMessageWithBusinessLogic(
     conversation.messageCount = (conversation.messageCount || 0) + 1;
     await conversation.save();
 
-    // 2. Check if awaiting confirmation
-    const lastAssistantMsg = findLastAssistantMessage(conversation.messages);
-    const isAwaitingConfirmation = lastAssistantMsg?.payload?.action === 'request_confirmation';
 
-    // 3. Prepare LLM context
+    // 2. Prepare LLM context
     const llmMessage = prepareLLMMessage(userMessageText, normalizedAttachmentIds);
     const existingCustomerContext = conversation.customerId
         ? await getCustomerContext(conversation.customerId._id || conversation.customerId)
         : null;
 
-    // 4. Get LLM response
+    // 3. Get LLM response
     const llmResponse = await getLLMResponse(
         conversation,
         llmMessage,
@@ -114,12 +111,12 @@ export async function sendMessageWithBusinessLogic(
         existingCustomerContext
     );
 
-    // 5. Save assistant message
+    // 4. Save assistant message
     const assistantMessage = createAssistantMessage(llmResponse);
     conversation.messages.push(assistantMessage);
     conversation.messageCount = (conversation.messageCount || 0) + 1;
 
-    // 6. Process based on action type
+    // 5. Process based on action type
     if (llmResponse?.action === 'store_answer' && llmResponse.storedQuestionId) {
         await processStoreAnswer(
             conversation,
@@ -129,6 +126,7 @@ export async function sendMessageWithBusinessLogic(
         );
     }
 
+    // 6. Check if awaiting confirmation
     if (llmResponse?.action === 'request_confirmation') {
         metadata.awaitingConfirmation = true;
         logger.info(`Conversation ${conversationId} awaiting user confirmation`);
@@ -170,15 +168,6 @@ function prepareLLMMessage(userMessageText: string, attachmentIds: string[]): st
     return userMessageText
         ? `${userMessageText} [Attachment IDs: ${idList}]`
         : `[Attachment IDs: ${idList}]`;
-}
-
-function findLastAssistantMessage(messages: IMessage[]): IMessage | null {
-    for (let i = messages.length - 1; i >= 0; i--) {
-        if (messages[i].role === 'assistant') {
-            return messages[i];
-        }
-    }
-    return null;
 }
 
 async function getCustomerContext(customerId: any): Promise<string | null> {
@@ -256,25 +245,6 @@ function collectAllAnswersFromMessages(messages: IMessage[]): Record<string, any
     return collectedData;
 }
 
-// ==================== FILE FIELD DETECTION ====================
-
-function isFileField(type: string, questionId: string): boolean {
-    // Check by type
-    if (type === 'file' || type === 'files') {
-        return true;
-    }
-
-    // Check by field name patterns
-    const filePatterns = [
-        'photo', 'photos', 'image', 'images',
-        'attachment', 'attachments', 'upload', 'uploads',
-        'document', 'documents', 'file', 'files'
-    ];
-
-    return filePatterns.some(pattern =>
-        questionId.toLowerCase().includes(pattern)
-    );
-}
 
 // ==================== CORE PROCESSING ====================
 
@@ -391,9 +361,7 @@ async function processStoreAnswer(
         if (conversation.customerId) {
             try {
                 // Check if this is a file field
-                const isFile = isFileField(fieldType, storedQuestionId);
-
-                if (isFile) {
+                if (fieldType === 'files') {
                     // For file fields, only update attachments array, NOT profile
                     const fileIds = extractAttachmentIdsFromValue(value);
 
@@ -532,7 +500,7 @@ function buildProfileFromAnswers(answers: Record<string, any>): Record<string, a
         if (value === null || value === undefined) return;
 
         // Skip file fields - they go to attachments array ONLY
-        if (isFileField(type, questionId)) {
+        if (type === 'files') {
             return;
         }
 
@@ -546,10 +514,10 @@ function buildProfileFromAnswers(answers: Record<string, any>): Record<string, a
 function extractAttachmentIdsFromAnswers(answers: Record<string, any>): string[] {
     const allIds: string[] = [];
 
-    Object.entries(answers).forEach(([questionId, data]) => {
+    Object.entries(answers).forEach(([_, data]) => {
         const { value, type } = data;
 
-        if (isFileField(type, questionId)) {
+        if (type === 'files') {
             const ids = extractAttachmentIdsFromValue(value);
             allIds.push(...ids);
         }

@@ -1,14 +1,12 @@
 import { Schema, model } from 'mongoose';
 import { IFormConfig } from '../interfaces';
 
-
 const FormConfigSchema = new Schema<IFormConfig>(
   {
-    name: { type: String, required: true },
+    title: { type: String, required: true },
     welcomeMessage: { type: String, required: true },
-    slug: { type: String, required: true, unique: true, default: 'solar-onboarding-v1' },
-    description: { type: String },
-    version: { type: Number, default: 1 },
+    locale: { type: String, required: true },
+    description: { type: String, required: true },
     formJson: { type: Schema.Types.Mixed, required: true },
     createdBy: { type: String },
     isActive: { type: Boolean, default: true },

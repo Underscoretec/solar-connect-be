@@ -6,83 +6,12 @@ import config from "../config";
 import logger from "../services/logger";
 import { parseGeminiOutput } from "./helpers";
 
-// export async function callGemini(
-//   historyMessages: any[],
-//   userMessage: string
-// ): Promise<string> {
 
-//   const systemPrompt = SYSTEM_PROMPT;
-//   const formJson = FORM_JSON;
-
-//   try {
-//     const genAI = new GoogleGenerativeAI(config.geminiApiKey);
-//     const model = genAI.getGenerativeModel({
-//       model: config.geminiModel,
-//       systemInstruction: systemPrompt
-//     });
-
-//     const contents: any[] = [];
-
-//     // Inject form config at the start
-//     contents.push({
-//       role: 'user',
-//       parts: [{
-//         text: `[FORM CONFIGURATION]\n${JSON.stringify(formJson, null, 2)}\n\nFollow this configuration strictly for data collection.`
-//       }]
-//     });
-
-//     contents.push({
-//       role: 'model',
-//       parts: [{
-//         text: 'Understood. I will follow the form configuration precisely and return responses in the specified JSON format.'
-//       }]
-//     });
-
-//     // Add conversation history
-//     historyMessages.forEach(msg => {
-//       if (msg.role === 'user' || msg.role === 'assistant') {
-//         contents.push({
-//           role: msg.role === 'user' ? 'user' : 'model',
-//           parts: [{ text: msg.text || '' }]
-//         });
-//       }
-//     });
-
-//     // Add current user message
-//     contents.push({
-//       role: 'user',
-//       parts: [{ text: userMessage }]
-//     });
-
-//     const chat = model.startChat({
-//       history: contents.slice(0, -1),
-//       generationConfig: {
-//         temperature: 0,
-//         topK: 1,
-//         topP: 1,
-//         maxOutputTokens: 2048,
-//       }
-//     });
-
-//     const result = await chat.sendMessage(userMessage);
-//     const response = result.response;
-//     const text = response.text();
-
-//     logger.info(`✅ Gemini response generated (${text.length} chars)`);
-
-//     return text;
-//   } catch (error: any) {
-//     const logger = require('../services/logger').default;
-//     logger.error(`❌ Gemini API call failed: ${error.message}`);
-//     throw new Error(`Failed to call Gemini API: ${error.message}`);
-//   }
-// }
 
 export async function callGemini(
   historyMessages: any[],
   userMessage: string
 ): Promise<any> {
-  const logger = require('../services/logger').default;
 
   const systemPrompt = SYSTEM_PROMPT_V2;
   const formJson = FORM_JSON2;
@@ -161,7 +90,6 @@ export async function callGemini(
     // Return the raw assistant text (which should be a valid JSON string)
     return parsedText;
   } catch (error: any) {
-    const logger = require('../services/logger').default;
     logger.error(`❌ Gemini API call failed: ${error.message}`, { stack: error.stack });
     throw new Error(`Failed to call Gemini API: ${error.message}`);
   }

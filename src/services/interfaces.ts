@@ -189,13 +189,12 @@ export interface User extends MongooseDocument {
 
 
 export interface IFormConfig extends MongooseDocument {
-  name: string;          // Human-readable name
-  welcomeMessage: string; // Welcome message for the form
-  slug: string;          // For URLs, e.g., "solar-onboarding-v1"
-  description?: string;
-  version: number;
-  formJson: any;         // The full FORM_JSON object
-  createdBy?: string;    // User ID / email / tenant id, etc.
+  title: string;
+  welcomeMessage: string;
+  locale: string;
+  description: string;
+  formJson: any;
+  createdBy?: string;
   isActive: boolean;
   createdAt?: Date;
   updatedAt?: Date;

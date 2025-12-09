@@ -15,10 +15,14 @@ const router = express.Router();
 router.post("/", async (req, res) => {
   try {
     const formConfig = await controllers.createFormConfig({
-      name: req.body.name,
+      title: req.body.title,
       welcomeMessage: req.body.welcomeMessage,
+      locale: req.body.locale,
       description: req.body.description,
       formJson: req.body.formJson,
+      completionMessage: req.body.completionMessage,
+      completionActions: req.body.completionActions,
+      completionType: req.body.completionType,
       createdBy: req.body.createdBy,
       isActive: req.body.isActive,
     });
@@ -132,10 +136,14 @@ router.get("/", async (req, res) => {
 router.put("/:id", async (req, res) => {
   try {
     const formConfig = await controllers.updateFormConfig(req.params.id, {
-      name: req.body.name,
+      title: req.body.title,
       welcomeMessage: req.body.welcomeMessage,
+      locale: req.body.locale,
       description: req.body.description,
       formJson: req.body.formJson,
+      completionMessage: req.body.completionMessage,
+      completionActions: req.body.completionActions,
+      completionType: req.body.completionType,
       isActive: req.body.isActive,
     });
 

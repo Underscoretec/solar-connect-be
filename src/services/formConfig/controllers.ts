@@ -3,10 +3,14 @@ import logger from '../logger';
 import { IFormConfig } from '../interfaces';
 
 interface CreateFormConfigParams {
-  name: string;
+  title: string;
   welcomeMessage: string;
-  description?: string;
+  locale: string;
+  description: string;
   formJson: any;
+  completionMessage?: string;
+  completionActions?: string[];
+  completionType?: string;
   createdBy?: string;
   isActive?: boolean;
 }
@@ -15,17 +19,31 @@ export async function createFormConfig(
   params: CreateFormConfigParams
 ): Promise<IFormConfig> {
   try {
+    // Merge completion settings into formJson if provided
+    let formJson = params.formJson;
+    if (params.completionMessage || params.completionActions || params.completionType) {
+      formJson = {
+        ...formJson,
+        completion: {
+          message: params.completionMessage || formJson.completion?.message || "Thank you! I've collected all the necessary information. Our team will review your details and reach out within 24 hours.",
+          actions: params.completionActions || formJson.completion?.actions || [],
+          type: params.completionType || formJson.completion?.type || "summary",
+        },
+      };
+    }
+
     const formConfig = new FormConfig({
-      name: params.name,
+      title: params.title,
       welcomeMessage: params.welcomeMessage,
+      locale: params.locale,
       description: params.description,
-      formJson: params.formJson,
+      formJson: formJson,
       createdBy: params.createdBy,
       isActive: params.isActive !== undefined ? params.isActive : true,
     });
 
     await formConfig.save();
-    logger.info(`Form config created: ${formConfig.slug}`);
+    logger.info(`Form config created: ${formConfig.title}`);
     return formConfig;
   } catch (error: any) {
     logger.error(`Error creating form config: ${error.message}`);
@@ -39,6 +57,16 @@ export async function getFormConfigById(id: string): Promise<IFormConfig | null>
     return formConfig;
   } catch (error: any) {
     logger.error(`Error getting form config by ID: ${error.message}`);
+    throw error;
+  }
+}
+
+export async function getFormConfigByLocale(): Promise<IFormConfig | null> {
+  try {
+    const formConfig = await FormConfig.findOne({ isActive: true });
+    return formConfig;
+  } catch (error: any) {
+    logger.error(`Error getting form config by locale: ${error.message}`);
     throw error;
   }
 }
@@ -72,8 +100,8 @@ export async function getFormConfigsList(params: {
 
     if (params.search) {
       query.$or = [
-        { name: { $regex: params.search, $options: 'i' } },
-        { slug: { $regex: params.search, $options: 'i' } },
+        { title: { $regex: params.search, $options: 'i' } },
+        { locale: { $regex: params.search, $options: 'i' } },
         { description: { $regex: params.search, $options: 'i' } },
       ];
     }
@@ -98,9 +126,45 @@ export async function updateFormConfig(
   updates: Partial<CreateFormConfigParams>
 ): Promise<IFormConfig | null> {
   try {
+    // Get existing form config to merge completion settings
+    const existingConfig = await FormConfig.findById(id);
+    if (!existingConfig) {
+      return null;
+    }
+
+    // Merge completion settings into formJson if provided
+    let formJson = updates.formJson !== undefined ? updates.formJson : existingConfig.formJson;
+    if (updates.completionMessage || updates.completionActions || updates.completionType) {
+      formJson = {
+        ...formJson,
+        completion: {
+          message: updates.completionMessage !== undefined
+            ? updates.completionMessage
+            : (formJson.completion?.message || "Thank you! I've collected all the necessary information. Our team will review your details and reach out within 24 hours."),
+          actions: updates.completionActions !== undefined
+            ? updates.completionActions
+            : (formJson.completion?.actions || []),
+          type: updates.completionType !== undefined
+            ? updates.completionType
+            : (formJson.completion?.type || "summary"),
+        },
+      };
+    }
+
+    const updateData: any = {
+      ...updates,
+      formJson: formJson,
+      updatedAt: new Date(),
+    };
+
+    // Remove completion fields from update data as they're merged into formJson
+    delete updateData.completionMessage;
+    delete updateData.completionActions;
+    delete updateData.completionType;
+
     const formConfig = await FormConfig.findByIdAndUpdate(
       id,
-      { ...updates, updatedAt: new Date() },
+      updateData,
       { new: true }
     );
     return formConfig;
