@@ -7,6 +7,8 @@ import { sendConversationLinkEmail, sendThankYouEmail } from '../../lib/mail';
 import { normalizeEmail, isValidEmail } from '../../lib/helpers';
 import { IConversation, IMessage } from '../interfaces';
 import mongoose from 'mongoose';
+import * as flowManager from './flow-manager';
+import { FORM_JSON2 } from '../../prompts/formJson';
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 
@@ -39,24 +41,8 @@ export async function createConversation(params: CreateConversationParams): Prom
     await conversation.save();
     logger.info(`Conversation created: ${conversation._id}`);
 
-    try {
-        const jsonResponse = await callGemini([], 'Yes, I\'m interested');
-        const assistantMessage: IMessage = {
-            role: 'assistant',
-            text: jsonResponse.message || '',
-            payload: jsonResponse,
-            questionId: jsonResponse.questionId || null,
-            createdAt: new Date()
-        };
-
-        conversation.messages.push(assistantMessage);
-        conversation.messageCount = 1;
-        await conversation.save();
-
-        logger.info(`Initial LLM response added to conversation ${conversation._id}`);
-    } catch (error: any) {
-        logger.warn(`Failed to generate initial LLM response: ${error.message}`);
-    }
+    // Don't add initial message here - let LLM generate it when first message is sent
+    // The frontend will send "Yes, I'm interested" or similar to trigger LLM response
 
     return conversation;
 }

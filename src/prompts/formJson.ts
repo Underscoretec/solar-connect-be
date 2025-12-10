@@ -232,7 +232,7 @@ export const FORM_JSON2 = {
       "id": "3",
       "questionId": "number_of_solar_panels",
       "type": "text",
-      "required": true,
+      "required": false,
       "placeholder": "1, 2, 3, 4, 5, 6, 7, 8, 9, 10",
       "context": "For installation coordination and updates",
     },
