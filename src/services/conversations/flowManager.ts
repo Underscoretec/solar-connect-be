@@ -48,6 +48,7 @@ export interface NextQuestionResult {
   nextOrder: string | null; // joined orderPath like "8", "8:1", "8:2:1"
   isComplete: boolean;
   remainingTopLevelIds: string[];
+  completionMessage?: any; // completion message from formJson when isComplete is true
 }
 
 /* ---------------------------
@@ -465,12 +466,15 @@ export function getNextQuestion(formJson: FormJson, collected: CollectedItem[]):
 
   const nextOrder = traversal.orderPath && traversal.orderPath.length > 0 ? traversal.orderPath.join(":") : null;
 
+  const isComplete = traversal.next === null;
+
   return {
     nextField: traversal.next,
     path: traversal.path,
     orderPath: traversal.orderPath,
     nextOrder,
-    isComplete: traversal.next === null,
+    isComplete,
     remainingTopLevelIds: remainingTopLevel,
+    completionMessage: isComplete ? formJson.completion : undefined,
   };
 }

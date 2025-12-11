@@ -9,6 +9,7 @@ import { IConversation, IMessage } from '../interfaces';
 import { callFormLlm, LlmTurnInput, LlmTurnOutput } from './openAiHanlder';
 import { FORM_JSON2 } from '../../prompts/formJson';
 import { getNextQuestion } from './flowManager';
+import { buildProfileTree } from './buildProfileTree';
 import Customer from '../customers/model';
 import mongoose from 'mongoose';
 
@@ -315,20 +316,38 @@ export async function sendMessageWithBusinessLogic(
 
     logger.info(`Processing message for question: ${currentQuestionId}, collectedSoFar: ${Object.keys(collectedDataObj).join(', ')}`);
 
-    // STEP 1: Parse user's response
+    // Check if we're awaiting confirmation (last message was confirm_summary)
+    const awaitingConfirmation = lastAskMessage?.payload?.llmMode === 'confirm_summary';
+
+    // STEP 1: Parse user's response (or handle confirmation reply)
     let parseOutput: LlmTurnOutput | null = null;
     try {
-        const parseInput: LlmTurnInput = {
-            mode: 'parse',
-            field: currentField,
-            collectedData: collectedDataObj,
-            lastUserMessage: typeof userMessageText === 'string' ? userMessageText : JSON.stringify(userMessageText),
-            attachmentsMeta
-        };
-        parseOutput = await callFormLlm(parseInput);
-        logger.info(`Parse output: ${JSON.stringify(parseOutput).substring(0, 200)}`);
+        // If awaiting confirmation, use confirm_reply mode
+        if (awaitingConfirmation) {
+            const organizedProfile = buildProfileTree(collectedProfile);
+            const confirmReplyInput: LlmTurnInput = {
+                mode: 'confirm_reply',
+                field: null,
+                collectedData: organizedProfile,
+                lastUserMessage: typeof userMessageText === 'string' ? userMessageText : JSON.stringify(userMessageText),
+                attachmentsMeta: []
+            };
+            parseOutput = await callFormLlm(confirmReplyInput);
+            logger.info(`Confirm reply output: ${JSON.stringify(parseOutput).substring(0, 200)}`);
+        } else {
+            // Normal parse mode
+            const parseInput: LlmTurnInput = {
+                mode: 'parse',
+                field: currentField,
+                collectedData: collectedDataObj,
+                lastUserMessage: typeof userMessageText === 'string' ? userMessageText : JSON.stringify(userMessageText),
+                attachmentsMeta
+            };
+            parseOutput = await callFormLlm(parseInput);
+            logger.info(`Parse output: ${JSON.stringify(parseOutput).substring(0, 200)}`);
+        }
     } catch (err: any) {
-        logger.error('LLM parse failed: ' + String(err));
+        logger.error('LLM parse/confirm_reply failed: ' + String(err));
         const errorMsg = createAssistantMessage(
             "I'm having trouble understanding that. Could you please rephrase your answer?",
             { llmMode: 'error' },
@@ -432,23 +451,62 @@ export async function sendMessageWithBusinessLogic(
         return { conversation, metadata };
     }
 
+    // Handle user wanting to update info during confirmation
+    if (parseOutput.confirmation?.status === 'changes') {
+        // User wants to update their info
+        // Save the assistant's message acknowledging the update request
+        const updateRequestMsg = createAssistantMessage(
+            parseOutput.assistantText || "What would you like to update?",
+            {
+                llmMode: 'update_request',
+                confirmation: parseOutput.confirmation
+            }
+        );
+        conversation.messages.push(updateRequestMsg);
+        conversation.messageCount = (conversation.messageCount || 0) + 1;
+        metadata.updateRequested = true;
+
+        // If specific fields are mentioned, update them
+        if (parseOutput.confirmation.updatedFields && Object.keys(parseOutput.confirmation.updatedFields).length > 0) {
+            for (const [qId, value] of Object.entries(parseOutput.confirmation.updatedFields)) {
+                await storeCollectedAnswer(conversation, qId, value, null);
+            }
+            // Refresh collected profile
+            collectedProfile = Array.isArray(conversation.meta.collectedProfile)
+                ? conversation.meta.collectedProfile
+                : [];
+        }
+
+        await conversation.save();
+        return { conversation, metadata };
+    }
+
     if (parseOutput.action === 'complete') {
         conversation.status = 'closed';
-        const finalCollectedObj = collectedProfileArrayToObject(collectedProfile);
-        const email = finalCollectedObj.email;
 
-        if (email && isValidEmail(normalizeEmail(email))) {
+        // Build organized profile tree
+        const organizedProfile = buildProfileTree(collectedProfile);
+
+        // Extract name from organized profile
+        const userName = organizedProfile.full_name?.value || 'there';
+
+        // Extract email from organized profile
+        const userEmail = organizedProfile.email?.value;
+
+        if (userEmail && isValidEmail(normalizeEmail(userEmail))) {
             try {
                 await sendThankYouEmail(
-                    normalizeEmail(email),
-                    finalCollectedObj.full_name || 'there',
-                    finalCollectedObj
+                    normalizeEmail(userEmail),
+                    userName,
+                    organizedProfile
                 );
                 metadata.completed = true;
             } catch (err: any) {
                 logger.warn('Failed to send thank-you email: ' + String(err));
             }
         }
+
+        metadata.organizedProfile = organizedProfile;
         await conversation.save();
         return { conversation, metadata };
     }
@@ -462,34 +520,49 @@ export async function sendMessageWithBusinessLogic(
     // If no next field, ask for confirmation
     if (!nextField || nextQuestionResult.isComplete) {
         try {
-            const finalCollectedObj = collectedProfileArrayToObject(collectedProfile);
+            // Build organized profile tree for frontend display
+            const organizedProfile = buildProfileTree(collectedProfile);
+
+            // Extract name for personalization
+            const userName = organizedProfile.full_name?.value || '';
+
             const confirmIn: LlmTurnInput = {
                 mode: 'confirm_summary',
                 field: null,
-                collectedData: finalCollectedObj,
+                collectedData: organizedProfile,
                 lastUserMessage: null,
                 attachmentsMeta: []
             };
             const confirmOut = await callFormLlm(confirmIn);
 
             const confirmMsg = createAssistantMessage(
-                confirmOut.assistantText || "I've collected all the information. Please review and confirm.",
+                confirmOut.assistantText || `Perfect${userName ? ', ' + userName : ''}! I've collected all your information. Please review the details shown below and click 'Submit' to confirm or 'I want to update my info' if you need to make any changes.`,
                 {
                     llmMode: 'confirm_summary',
-                    summary: finalCollectedObj
+                    organizedProfile: organizedProfile,
+                    completionMessage: nextQuestionResult.completionMessage
                 }
             );
             conversation.messages.push(confirmMsg);
             conversation.messageCount = (conversation.messageCount || 0) + 1;
             metadata.awaitingConfirmation = true;
+            metadata.organizedProfile = organizedProfile;
         } catch (err: any) {
             logger.error('LLM confirm_summary failed: ' + String(err));
+            // Fallback with organized profile
+            const organizedProfile = buildProfileTree(collectedProfile);
+            const userName = organizedProfile.full_name?.value || '';
             const fallbackMsg = createAssistantMessage(
-                "I've collected everything. Do you want to review or confirm?",
-                { llmMode: 'confirm_summary' }
+                `I've collected everything${userName ? ', ' + userName : ''}. Please review and click 'Submit' to confirm or 'I want to update my info' to make changes.`,
+                {
+                    llmMode: 'confirm_summary',
+                    organizedProfile: organizedProfile,
+                    completionMessage: nextQuestionResult.completionMessage
+                }
             );
             conversation.messages.push(fallbackMsg);
             conversation.messageCount = (conversation.messageCount || 0) + 1;
+            metadata.organizedProfile = organizedProfile;
         }
         await conversation.save();
         return { conversation, metadata };

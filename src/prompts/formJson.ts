@@ -450,7 +450,7 @@ export const FORM_JSON2 = {
   ],
 
   "completion": {
-    "message": "Thank you {name}! I've collected all the necessary information. Our team will review your details and reach out within 24 hours with a customized solar solution.",
+    "message": "Thank you {full_name}! I've collected all the necessary information. Our team will review your details and reach out within 24 hours with a customized solar solution.",
     "actions": [
       "create_customer_record",
       "send_confirmation_email",
