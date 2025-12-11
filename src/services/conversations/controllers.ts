@@ -25,6 +25,15 @@ interface CreateConversationParams {
 
 // ========= Utilities =========
 
+interface AttachmentObject {
+    _id: string;
+    url: string;
+    filename: string;
+    type: string;
+    mimeType: string;
+    size: number;
+}
+
 function createUserMessage(text: string, attachmentIds: string[]): IMessage {
     return {
         role: 'user',
@@ -53,6 +62,33 @@ async function loadAttachmentsMeta(ids: string[] = []) {
         mimeType: d.mimeType,
         size: d.size
     }));
+}
+
+/** Transform flat array of attachments into nested structure grouped by type */
+function transformAttachmentsToNestedStructure(
+    attachments: AttachmentObject[],
+    currentNextOrder: string | null
+): Record<string, any> {
+    if (!attachments || attachments.length === 0) return {};
+
+    const nested: Record<string, any> = {};
+
+    attachments.forEach((attachment, index) => {
+        const fieldId = attachment.type;
+        const orderPath = currentNextOrder ? `${currentNextOrder}:${index + 1}` : `${index + 1}`;
+
+        nested[fieldId] = {
+            id: `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+            order: orderPath,
+            questionId: fieldId,
+            value: {
+                name: attachment.filename,
+                url: attachment.url
+            }
+        };
+    });
+
+    return nested;
 }
 
 /** Convert collectedProfile array to object format for LLM */
@@ -232,24 +268,30 @@ export async function createConversation(params: CreateConversationParams): Prom
 export async function sendMessageWithBusinessLogic(
     conversationId: string,
     userMessageText: string | null,
-    attachmentIds: string[] = []
+    attachments: AttachmentObject[] = []
 ): Promise<{ conversation: IConversation; metadata: any }> {
     const conversation = await Conversation.findById(conversationId).populate('messages.attachments');
     if (!conversation) throw new Error('Conversation not found');
 
     const metadata: any = {};
-    const normalizedAttachmentIds = Array.from(new Set(attachmentIds || []));
+    const normalizedAttachments = attachments || [];
+    const attachmentIds = normalizedAttachments.map(a => a._id);
 
     // Save user message
     const userMessage = createUserMessage(
         typeof userMessageText === 'string' ? userMessageText : JSON.stringify(userMessageText),
-        normalizedAttachmentIds
+        attachmentIds
     );
     conversation.messages.push(userMessage);
     conversation.messageCount = (conversation.messageCount || 0) + 1;
 
-    // Load attachments metadata
-    const attachmentsMeta = await loadAttachmentsMeta(normalizedAttachmentIds);
+    // Prepare attachments metadata for LLM (legacy format for compatibility)
+    const attachmentsMeta = normalizedAttachments.map(a => ({
+        id: a._id,
+        type: a.type,
+        mimeType: a.mimeType,
+        size: a.size
+    }));
 
     // Ensure meta.collectedProfile exists
     if (!conversation.meta) conversation.meta = {};
@@ -340,7 +382,13 @@ export async function sendMessageWithBusinessLogic(
     // STEP 5: Store the valid answer if we should
     if (shouldStore) {
         const qId = parseOutput.questionId || currentQuestionId;
-        const ans = parseOutput.answer ?? parseOutput.validation?.normalized ?? null;
+        let ans = parseOutput.answer ?? parseOutput.validation?.normalized ?? null;
+
+        // SPECIAL: Transform file attachments into nested structure
+        if (normalizedAttachments.length > 0 && currentField?.type === 'files') {
+            ans = transformAttachmentsToNestedStructure(normalizedAttachments, currentNextOrder);
+            logger.info(`Transformed ${normalizedAttachments.length} attachments into nested structure for ${qId}`);
+        }
 
         if (qId && ans !== null && ans !== undefined) {
             await storeCollectedAnswer(conversation, qId, ans, currentNextOrder);
@@ -482,11 +530,11 @@ export async function sendMessageWithBusinessLogic(
     conversation.messageCount = (conversation.messageCount || 0) + 1;
 
     // Update file stats
-    if (normalizedAttachmentIds.length > 0) {
+    if (normalizedAttachments.length > 0) {
         if (!conversation.fileStats) {
             (conversation as any).fileStats = { totalUploads: 0, uploadedTypes: [] };
         }
-        conversation.fileStats!.totalUploads = (conversation.fileStats!.totalUploads || 0) + normalizedAttachmentIds.length;
+        conversation.fileStats!.totalUploads = (conversation.fileStats!.totalUploads || 0) + normalizedAttachments.length;
         const types = attachmentsMeta.map(a => a.type).filter(Boolean);
         conversation.fileStats!.uploadedTypes = Array.from(
             new Set([...(conversation.fileStats!.uploadedTypes || []), ...types])

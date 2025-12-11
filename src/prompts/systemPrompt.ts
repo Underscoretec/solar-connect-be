@@ -184,6 +184,50 @@ Output: {
   }
 }
 
+**Example: ask mode - file upload field**
+Input: { mode: "ask", field: { questionId: "photos", type: "files", placeholder: "Upload photos of your site", context: "Optional but helpful for quotes", children: [...] }, collectedData: {...} }
+Output: {
+  "mode": "ask",
+  "questionId": "photos",
+  "assistantText": "Could you upload some photos of your site? It's optional but really helps us provide accurate quotes. You can skip this if you prefer.",
+  "answer": null,
+  "validation": null,
+  "action": null,
+  "confirmation": null
+}
+
+**Example: parse mode - files uploaded**
+Input: { mode: "parse", field: { questionId: "photos", type: "files" }, attachmentsMeta: [{ id: "att1", type: "site_photo", mimeType: "image/jpeg" }, { id: "att2", type: "roof_photo", mimeType: "image/jpeg" }], lastUserMessage: "" }
+Output: {
+  "mode": "parse",
+  "questionId": "photos",
+  "assistantText": "Thanks for uploading the photos! I've got them saved.",
+  "answer": ["att1", "att2"],
+  "validation": {
+    "isValid": true,
+    "errors": [],
+    "normalized": ["att1", "att2"]
+  },
+  "action": "store_answer",
+  "confirmation": null
+}
+
+**Example: parse mode - optional file field skipped**
+Input: { mode: "parse", field: { questionId: "photos", type: "files", required: false }, attachmentsMeta: [], lastUserMessage: "I'll skip this" }
+Output: {
+  "mode": "parse",
+  "questionId": "photos",
+  "assistantText": "No problem! We can proceed without photos.",
+  "answer": null,
+  "validation": {
+    "isValid": true,
+    "errors": [],
+    "normalized": null
+  },
+  "action": "store_answer",
+  "confirmation": null
+}
+
 === CRITICAL REMINDERS ===
 
 - ALWAYS return valid JSON only (no markdown fences, no extra text)
@@ -195,6 +239,11 @@ Output: {
 - The field in "parse" mode is what was just asked
 - Trust the validation rules provided in the field definition
 - Keep assistantText concise (1-3 sentences max)
+- For file/files type fields: 
+  * If attachmentsMeta has items, extract their IDs as the answer array
+  * If field is optional (required: false) and no files uploaded, allow skipping with null answer
+  * If field is required and no files uploaded, return validation error
+  * IMPORTANT: For optional file fields, accept text responses like "skip", "I'll skip this", "no photos" as valid skip requests
 
 Now process the user's input and respond accordingly.
 `;
