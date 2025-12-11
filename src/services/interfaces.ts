@@ -84,7 +84,7 @@ export interface IMessage {
   text?: string;
   payload?: Record<string, any>;
   attachments?: Types.ObjectId[];
-  questionId?: string;
+  questionId?: string | null;
   createdByAdmin?: Types.ObjectId;
   createdAt?: Date;
 }

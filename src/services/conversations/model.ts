@@ -92,7 +92,7 @@ const conversationSchema = new Schema<IConversation>({
     type: Schema.Types.Mixed,
     default: null
   }
-}, { timestamps: true });
+}, { timestamps: true, minimize: false });
 
 // Indexes
 conversationSchema.index({ sessionId: 1 });

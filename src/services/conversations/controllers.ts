@@ -1,11 +1,15 @@
+// src/controllers/conversationsController.ts
 import config from '../../config';
 import logger from '../logger';
 import Conversation from './model';
-import Customer from '../customers/model';
-import { callGemini } from '../../lib/llm';
+import Attachment from '../attachments/model';
 import { sendConversationLinkEmail, sendThankYouEmail } from '../../lib/mail';
 import { normalizeEmail, isValidEmail } from '../../lib/helpers';
 import { IConversation, IMessage } from '../interfaces';
+import { callFormLlm, LlmTurnInput, LlmTurnOutput } from './openAiHanlder';
+import { FORM_JSON2 } from '../../prompts/formJson';
+import { getNextQuestion } from './flowManager';
+import Customer from '../customers/model';
 import mongoose from 'mongoose';
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
@@ -19,7 +23,149 @@ interface CreateConversationParams {
     initialUserResponse?: string;
 }
 
-// ==================== CONVERSATION CREATION ====================
+// ========= Utilities =========
+
+function createUserMessage(text: string, attachmentIds: string[]): IMessage {
+    return {
+        role: 'user',
+        text,
+        attachments: (attachmentIds || []).map(id => id as any),
+        createdAt: new Date()
+    };
+}
+
+function createAssistantMessage(text: string, payload: any, questionId?: string): IMessage {
+    return {
+        role: 'assistant',
+        text,
+        payload,
+        questionId: questionId || (payload?.questionId ?? null),
+        createdAt: new Date()
+    };
+}
+
+async function loadAttachmentsMeta(ids: string[] = []) {
+    if (!ids || ids.length === 0) return [];
+    const docs = await Attachment.find({ _id: { $in: ids } }).lean();
+    return docs.map(d => ({
+        id: d._id.toString(),
+        type: d.type,
+        mimeType: d.mimeType,
+        size: d.size
+    }));
+}
+
+/** Convert collectedProfile array to object format for LLM */
+function collectedProfileArrayToObject(collectedProfile: any[]): Record<string, any> {
+    if (!Array.isArray(collectedProfile)) return {};
+    const obj: Record<string, any> = {};
+
+    for (const item of collectedProfile) {
+        if (item && item.questionId) {
+            obj[item.questionId] = item.value;
+        }
+    }
+    return obj;
+}
+
+/** Store collected answer with proper order path */
+async function storeCollectedAnswer(
+    conversation: IConversation,
+    questionId: string,
+    answer: any,
+    nextOrder: string | null = null
+) {
+    if (!conversation.meta) conversation.meta = {};
+    if (!conversation.meta.collectedProfile) conversation.meta.collectedProfile = [];
+    if (!Array.isArray(conversation.meta.collectedProfile)) {
+        conversation.meta.collectedProfile = [];
+    }
+
+    // Check if this questionId already exists
+    const existingIndex = conversation.meta.collectedProfile.findIndex(
+        (item: any) => item && item.questionId === questionId
+    );
+
+    const newItem = {
+        id: existingIndex >= 0
+            ? conversation.meta.collectedProfile[existingIndex].id
+            : `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        order: nextOrder || undefined,
+        questionId: questionId,
+        value: answer
+    };
+
+    if (existingIndex >= 0) {
+        conversation.meta.collectedProfile[existingIndex] = newItem;
+    } else {
+        conversation.meta.collectedProfile.push(newItem);
+    }
+
+    // Mark the nested field as modified so Mongoose will save it
+    conversation.markModified('meta');
+    conversation.markModified('meta.collectedProfile');
+
+    logger.info(`Stored answer for ${questionId}: ${JSON.stringify(answer).substring(0, 100)}`);
+}
+
+/** Create or update customer when email is received */
+async function createOrUpdateCustomer(
+    collectedProfile: any[],
+    conversationId: string
+): Promise<string | null> {
+    const profileObj = collectedProfileArrayToObject(collectedProfile);
+    const email = profileObj.email;
+
+    if (!email || !isValidEmail(normalizeEmail(email))) {
+        return null;
+    }
+
+    const normalizedEmail = normalizeEmail(email);
+
+    try {
+        // Find existing customer by email
+        let customer = await Customer.findOne({ 'profile.email': normalizedEmail });
+
+        if (customer) {
+            // Update existing customer with new data
+            customer.profile = {
+                ...customer.profile,
+                ...profileObj,
+                email: normalizedEmail,
+                leadStage: customer.profile?.leadStage || 'returning_customer'
+            };
+            customer.meta = {
+                ...customer.meta,
+                lastConversationId: conversationId,
+                lastUpdated: new Date()
+            };
+            await customer.save();
+            logger.info(`Updated existing customer: ${customer._id}`);
+        } else {
+            // Create new customer
+            customer = new Customer({
+                profile: {
+                    ...profileObj,
+                    email: normalizedEmail,
+                    leadStage: 'new_prospect'
+                },
+                meta: {
+                    firstConversationId: conversationId,
+                    createdAt: new Date()
+                }
+            });
+            await customer.save();
+            logger.info(`Created new customer: ${customer._id}`);
+        }
+
+        return customer._id.toString();
+    } catch (err: any) {
+        logger.error('Failed to create/update customer: ' + String(err));
+        return null;
+    }
+}
+
+// ========== Main Functions ==========
 
 export async function createConversation(params: CreateConversationParams): Promise<IConversation> {
     const conversation = new Conversation({
@@ -33,542 +179,324 @@ export async function createConversation(params: CreateConversationParams): Prom
         fileStats: {
             totalUploads: 0,
             uploadedTypes: []
+        },
+        meta: {
+            collectedProfile: []
         }
     });
 
     await conversation.save();
     logger.info(`Conversation created: ${conversation._id}`);
 
+    // Get first question
+    const next = getNextQuestion(FORM_JSON2 as any, []);
+    const nextField = next.nextField || null;
+
+    if (!nextField) {
+        throw new Error('No first question found in form definition');
+    }
+
+    // Ask LLM to produce the first question
     try {
-        const jsonResponse = await callGemini([], 'Yes, I\'m interested');
-        const assistantMessage: IMessage = {
-            role: 'assistant',
-            text: jsonResponse.message || '',
-            payload: jsonResponse,
-            questionId: jsonResponse.questionId || null,
-            createdAt: new Date()
+        const llmIn: LlmTurnInput = {
+            mode: 'ask',
+            field: nextField,
+            collectedData: {},
+            lastUserMessage: null,
+            attachmentsMeta: []
         };
+        const out = await callFormLlm(llmIn);
+
+        const assistantMessage = createAssistantMessage(
+            out.assistantText || nextField.context || 'Hello! Let me collect some information from you.',
+            {
+                llmMode: 'ask',
+                field: nextField,
+                orderPath: next.orderPath,
+                nextOrder: next.nextOrder
+            },
+            nextField.questionId
+        );
 
         conversation.messages.push(assistantMessage);
         conversation.messageCount = 1;
         await conversation.save();
-
-        logger.info(`Initial LLM response added to conversation ${conversation._id}`);
-    } catch (error: any) {
-        logger.warn(`Failed to generate initial LLM response: ${error.message}`);
+    } catch (err: any) {
+        logger.error('Failed to get initial question from LLM: ' + String(err));
+        throw err;
     }
 
     return conversation;
 }
 
-// ==================== MESSAGE SENDING ====================
-
 export async function sendMessageWithBusinessLogic(
     conversationId: string,
-    userMessageText: string,
-    attachmentIds?: string[]
-): Promise<{
-    conversation: IConversation;
-    metadata: {
-        emailSent?: boolean;
-        isExistingCustomer?: boolean;
-        completed?: boolean;
-        customerData?: any;
-        awaitingConfirmation?: boolean;
-    }
-}> {
-    const conversation = await Conversation.findById(conversationId)
-        .populate('customerId')
-        .populate('messages.attachments');
-
-    if (!conversation) {
-        throw new Error('Conversation not found');
-    }
+    userMessageText: string | null,
+    attachmentIds: string[] = []
+): Promise<{ conversation: IConversation; metadata: any }> {
+    const conversation = await Conversation.findById(conversationId).populate('messages.attachments');
+    if (!conversation) throw new Error('Conversation not found');
 
     const metadata: any = {};
-    const normalizedAttachmentIds = attachmentIds?.length
-        ? Array.from(new Set(attachmentIds))
-        : [];
+    const normalizedAttachmentIds = Array.from(new Set(attachmentIds || []));
 
-    // 1. Save user message with attachments
-    const userMessage = createUserMessage(userMessageText, normalizedAttachmentIds);
+    // Save user message
+    const userMessage = createUserMessage(
+        typeof userMessageText === 'string' ? userMessageText : JSON.stringify(userMessageText),
+        normalizedAttachmentIds
+    );
     conversation.messages.push(userMessage);
     conversation.messageCount = (conversation.messageCount || 0) + 1;
-    await conversation.save();
 
+    // Load attachments metadata
+    const attachmentsMeta = await loadAttachmentsMeta(normalizedAttachmentIds);
 
-    // 2. Prepare LLM context
-    const llmMessage = prepareLLMMessage(userMessageText, normalizedAttachmentIds);
-    const existingCustomerContext = conversation.customerId
-        ? await getCustomerContext(conversation.customerId._id || conversation.customerId)
-        : null;
+    // Ensure meta.collectedProfile exists
+    if (!conversation.meta) conversation.meta = {};
+    if (!conversation.meta.collectedProfile) conversation.meta.collectedProfile = [];
 
-    // 3. Get LLM response
-    const llmResponse = await getLLMResponse(
-        conversation,
-        llmMessage,
-        conversationId,
-        existingCustomerContext
+    let collectedProfile = Array.isArray(conversation.meta.collectedProfile)
+        ? conversation.meta.collectedProfile
+        : [];
+
+    // Get current question context (what was just asked)
+    const allAssistantMessages = [...conversation.messages]
+        .filter(m => m.role === 'assistant')
+        .reverse();
+    const lastAskMessage = allAssistantMessages.find(m => m.payload?.llmMode === 'ask') as IMessage | undefined;
+    const currentQuestionId = lastAskMessage?.questionId || null;
+    const currentNextOrder = lastAskMessage?.payload?.nextOrder || null;
+    const currentField = lastAskMessage?.payload?.field || null;
+
+    // Convert collected profile to object for LLM context
+    const collectedDataObj = collectedProfileArrayToObject(collectedProfile);
+
+    logger.info(`Processing message for question: ${currentQuestionId}, collectedSoFar: ${Object.keys(collectedDataObj).join(', ')}`);
+
+    // STEP 1: Parse user's response
+    let parseOutput: LlmTurnOutput | null = null;
+    try {
+        const parseInput: LlmTurnInput = {
+            mode: 'parse',
+            field: currentField,
+            collectedData: collectedDataObj,
+            lastUserMessage: typeof userMessageText === 'string' ? userMessageText : JSON.stringify(userMessageText),
+            attachmentsMeta
+        };
+        parseOutput = await callFormLlm(parseInput);
+        logger.info(`Parse output: ${JSON.stringify(parseOutput).substring(0, 200)}`);
+    } catch (err: any) {
+        logger.error('LLM parse failed: ' + String(err));
+        const errorMsg = createAssistantMessage(
+            "I'm having trouble understanding that. Could you please rephrase your answer?",
+            { llmMode: 'error' },
+            currentQuestionId || ''
+        );
+        conversation.messages.push(errorMsg);
+        conversation.messageCount = (conversation.messageCount || 0) + 1;
+        await conversation.save();
+        return { conversation, metadata };
+    }
+
+    // STEP 2: Handle validation errors (but NOT if it's valid with answer)
+    if (parseOutput.validation && !parseOutput.validation.isValid) {
+        const errorText = parseOutput.assistantText ||
+            `I couldn't validate that answer. ${parseOutput.validation.errors?.join(', ') || 'Please try again.'}`;
+
+        const errorMsg = createAssistantMessage(
+            errorText,
+            {
+                llmMode: 'validation_error',
+                errors: parseOutput.validation.errors,
+                field: currentField
+            },
+            currentQuestionId || ''
+        );
+        conversation.messages.push(errorMsg);
+        conversation.messageCount = (conversation.messageCount || 0) + 1;
+        await conversation.save();
+        return { conversation, metadata };
+    }
+
+    // STEP 3: Determine if we should store the answer
+    const shouldStore = parseOutput.action === 'store_answer' ||
+        (parseOutput.validation?.isValid && parseOutput.answer !== undefined && parseOutput.answer !== null);
+
+    logger.info(`Should store answer: ${shouldStore}, action: ${parseOutput.action}, isValid: ${parseOutput.validation?.isValid}, answer: ${parseOutput.answer}`);
+
+    // STEP 4: Save the assistant's acknowledgment (BEFORE storing to avoid re-asking)
+    const ackText = parseOutput.assistantText || "Got it, thanks!";
+    const ackMsg = createAssistantMessage(
+        ackText,
+        {
+            llmMode: 'parse',
+            parseResult: parseOutput
+        },
+        parseOutput.questionId || currentQuestionId || ''
     );
-
-    // 4. Save assistant message
-    const assistantMessage = createAssistantMessage(llmResponse);
-    conversation.messages.push(assistantMessage);
+    conversation.messages.push(ackMsg);
     conversation.messageCount = (conversation.messageCount || 0) + 1;
 
-    // 5. Process based on action type
-    if (llmResponse?.action === 'store_answer' && llmResponse.storedQuestionId) {
-        await processStoreAnswer(
-            conversation,
-            llmResponse,
-            normalizedAttachmentIds,
-            metadata
-        );
+    // STEP 5: Store the valid answer if we should
+    if (shouldStore) {
+        const qId = parseOutput.questionId || currentQuestionId;
+        const ans = parseOutput.answer ?? parseOutput.validation?.normalized ?? null;
+
+        if (qId && ans !== null && ans !== undefined) {
+            await storeCollectedAnswer(conversation, qId, ans, currentNextOrder);
+
+            // Refresh collected profile
+            collectedProfile = Array.isArray(conversation.meta.collectedProfile)
+                ? conversation.meta.collectedProfile
+                : [];
+
+            logger.info(`Stored answer for ${qId}. Total collected: ${collectedProfile.length}`);
+
+            // SPECIAL: Handle email - create/update customer and send link
+            if (qId === 'email') {
+                try {
+                    const customerId = await createOrUpdateCustomer(collectedProfile, conversation._id.toString());
+                    if (customerId) {
+                        conversation.customerId = customerId as any;
+                        metadata.customerCreated = true;
+                    }
+
+                    const normalized = normalizeEmail(String(ans));
+                    if (isValidEmail(normalized)) {
+                        await sendConversationLinkEmail(
+                            normalized,
+                            `${FRONTEND_URL}/chat?conversationId=${conversation._id}`
+                        );
+                        metadata.emailSent = true;
+                        logger.info(`Sent conversation link to ${normalized}`);
+                    }
+                } catch (err: any) {
+                    logger.warn('Failed to process email: ' + String(err));
+                }
+            }
+        }
     }
 
-    // 6. Check if awaiting confirmation
-    if (llmResponse?.action === 'request_confirmation') {
+    // STEP 6: Handle completion/confirmation requests
+    if (parseOutput.action === 'request_confirmation') {
         metadata.awaitingConfirmation = true;
-        logger.info(`Conversation ${conversationId} awaiting user confirmation`);
+        await conversation.save();
+        return { conversation, metadata };
     }
 
-    if (llmResponse?.action === 'complete' && llmResponse.completed) {
-        await processCompletion(
-            conversation,
-            metadata
-        );
-    }
-
-    await conversation.save();
-
-    // 7. Populate and return
-    await conversation.populate('messages.attachments');
-    await conversation.populate('customerId');
-
-    return { conversation, metadata };
-}
-
-// ==================== HELPER FUNCTIONS ====================
-
-function createUserMessage(text: string, attachmentIds: string[]): IMessage {
-    return {
-        role: 'user',
-        text,
-        attachments: attachmentIds.map(id => id as any),
-        createdAt: new Date()
-    };
-}
-
-function prepareLLMMessage(userMessageText: string, attachmentIds: string[]): string {
-    if (attachmentIds.length === 0) {
-        return userMessageText;
-    }
-
-    const idList = attachmentIds.join(', ');
-    return userMessageText
-        ? `${userMessageText} [Attachment IDs: ${idList}]`
-        : `[Attachment IDs: ${idList}]`;
-}
-
-async function getCustomerContext(customerId: any): Promise<string | null> {
-    try {
-        const customer = await Customer.findById(customerId)
-            .populate('attachments')
-            .lean();
-
-        if (!customer) return null;
-
-        return `\n\n[EXISTING CUSTOMER CONTEXT]\nThe user is a returning customer. Their current profile data:\n${JSON.stringify(customer.profile || {}, null, 2)}\n\nThey have ${customer.attachments?.length || 0} attachment(s) on file.\n\nIMPORTANT: Allow them to update any existing field or add new information. When they provide updated values, store them normally using store_answer.\n[END EXISTING CUSTOMER CONTEXT]\n`;
-    } catch (error) {
-        logger.error(`Failed to fetch customer context: ${error}`);
-        return null;
-    }
-}
-
-async function getLLMResponse(
-    conversation: IConversation,
-    llmMessage: string,
-    conversationId: string,
-    customerContext?: string | null
-): Promise<any> {
-    try {
-        const enhancedMessage = customerContext
-            ? `${llmMessage}${customerContext}`
-            : llmMessage;
-
-        return await callGemini(conversation.messages, enhancedMessage);
-    } catch (error: any) {
-        logger.error(`Failed to call LLM for conversation ${conversationId}: ${error.message}`);
-        const isRateLimit = error.message?.includes('429') ||
-            error.message?.includes('Too Many Requests') ||
-            error.message?.includes('Resource exhausted');
-
-        return {
-            message: isRateLimit
-                ? "I'm experiencing high demand right now. Please try again in a moment."
-                : "I'm having trouble processing your request. Please try again.",
-            action: null,
-            uiHint: null
-        };
-    }
-}
-
-function createAssistantMessage(llmResponse: any): IMessage {
-    return {
-        role: 'assistant',
-        text: llmResponse.message || '',
-        payload: llmResponse,
-        questionId: llmResponse?.questionId || null,
-        createdAt: new Date()
-    };
-}
-
-// ==================== COLLECT ALL ANSWERS ====================
-
-function collectAllAnswersFromMessages(messages: IMessage[]): Record<string, any> {
-    const collectedData: Record<string, any> = {};
-
-    messages.forEach(msg => {
-        if (msg.role === 'assistant' &&
-            msg.payload?.action === 'store_answer' &&
-            msg.payload.storedQuestionId &&
-            msg.payload.value !== null &&
-            msg.payload.value !== undefined) {
-
-            collectedData[msg.payload.storedQuestionId] = {
-                value: msg.payload.value,
-                type: msg.payload.uiHint?.type || 'text'
-            };
-        }
-    });
-
-    return collectedData;
-}
-
-
-// ==================== CORE PROCESSING ====================
-
-async function processStoreAnswer(
-    conversation: IConversation,
-    llmResponse: any,
-    attachmentIds: string[],
-    metadata: any
-): Promise<void> {
-    const { storedQuestionId, value, uiHint } = llmResponse;
-
-    if (!storedQuestionId || value === null || value === undefined) {
-        return;
-    }
-
-    const fieldType = uiHint?.type || 'text';
-
-    // Special handling for email field - this triggers customer creation/lookup
-    if (storedQuestionId === 'email') {
-        const normalizedEmail = normalizeEmail(value);
-
-        if (!isValidEmail(normalizedEmail)) {
-            logger.warn(`Invalid email format: ${value}`);
-            return;
-        }
-
-        try {
-            // Collect ALL answers from conversation history
-            const allCollectedAnswers = collectAllAnswersFromMessages(conversation.messages);
-
-            // Find or create customer
-            let customer = await Customer.findOne({ 'profile.email': normalizedEmail });
-
-            if (customer) {
-                // Existing customer - update with all collected data
-                metadata.isExistingCustomer = true;
-
-                const profileUpdates = buildProfileFromAnswers(allCollectedAnswers);
-                const attachmentIdsToAdd = extractAttachmentIdsFromAnswers(allCollectedAnswers);
-
-                // Update customer with all collected data
-                const updateData: any = {
-                    $set: {
-                        profile: { ...customer.profile, ...profileUpdates },
-                        'meta.lastUpdated': new Date(),
-                        'meta.lastConversation': conversation._id.toString()
-                    }
-                };
-
-                // Add attachments if any
-                if (attachmentIdsToAdd.length > 0) {
-                    const validIds = attachmentIdsToAdd
-                        .filter(id => mongoose.Types.ObjectId.isValid(id))
-                        .map(id => new mongoose.Types.ObjectId(id));
-
-                    if (validIds.length > 0) {
-                        updateData.$addToSet = {
-                            attachments: { $each: validIds }
-                        };
-                    }
-                }
-
-                customer = await Customer.findByIdAndUpdate(
-                    customer._id,
-                    updateData,
-                    { new: true, runValidators: true }
-                );
-
-                // Link to conversation
-                conversation.customerId = customer?._id;
-
-                logger.info(`Updated existing customer ${customer?._id} with all collected data`);
-            } else {
-                // New customer - create with all collected data
-                const profileData = buildProfileFromAnswers(allCollectedAnswers);
-                const attachmentIdsToAdd = extractAttachmentIdsFromAnswers(allCollectedAnswers);
-
-                const validIds = attachmentIdsToAdd
-                    .filter(id => mongoose.Types.ObjectId.isValid(id))
-                    .map(id => new mongoose.Types.ObjectId(id));
-
-                customer = new Customer({
-                    profile: profileData,
-                    attachments: validIds,
-                    meta: {
-                        createdFromConversation: conversation._id.toString(),
-                        createdAt: new Date()
-                    }
-                });
-
-                await customer.save();
-
-                conversation.customerId = customer._id;
-                metadata.isExistingCustomer = false;
-
-                logger.info(`Created new customer ${customer._id} with all collected data`);
-
-                // Send conversation link email
-                await sendEmailSafe(
-                    sendConversationLinkEmail,
-                    normalizedEmail,
-                    `${FRONTEND_URL}/chat?conversationId=${conversation._id}`,
-                    customer.profile?.full_name || 'there'
-                );
-
-                metadata.emailSent = true;
-            }
-        } catch (error: any) {
-            logger.error(`Failed to process email and create/update customer: ${error.message}`);
-            return;
-        }
-    } else {
-        // Non-email field - update customer if customer exists
-        if (conversation.customerId) {
-            try {
-                // Check if this is a file field
-                if (fieldType === 'files') {
-                    // For file fields, only update attachments array, NOT profile
-                    const fileIds = extractAttachmentIdsFromValue(value);
-
-                    if (fileIds.length > 0) {
-                        const validIds = fileIds
-                            .filter(id => mongoose.Types.ObjectId.isValid(id))
-                            .map(id => new mongoose.Types.ObjectId(id));
-
-                        if (validIds.length > 0) {
-                            await Customer.findByIdAndUpdate(
-                                conversation.customerId,
-                                {
-                                    $addToSet: {
-                                        attachments: { $each: validIds }
-                                    },
-                                    $set: {
-                                        'meta.lastUpdated': new Date(),
-                                        'meta.lastConversation': conversation._id.toString()
-                                    }
-                                },
-                                { new: true, runValidators: true }
-                            );
-
-                            logger.info(`Added ${validIds.length} attachments for field ${storedQuestionId}`);
-                        }
-                    }
-                } else {
-                    // For non-file fields, update profile
-                    const updateData: any = {
-                        $set: {
-                            [`profile.${storedQuestionId}`]: value,
-                            'meta.lastUpdated': new Date(),
-                            'meta.lastConversation': conversation._id.toString()
-                        }
-                    };
-
-                    await Customer.findByIdAndUpdate(
-                        conversation.customerId,
-                        updateData,
-                        { new: true, runValidators: true }
-                    );
-
-                    logger.info(`Updated customer ${conversation.customerId} field: ${storedQuestionId}`);
-                }
-            } catch (error: any) {
-                logger.error(`Failed to update customer field ${storedQuestionId}: ${error.message}`);
-            }
-        } else {
-            // No customer yet - this is expected before email is collected
-            logger.debug(`Field ${storedQuestionId} collected but no customer yet (email not collected)`);
-        }
-    }
-}
-
-async function processCompletion(
-    conversation: IConversation,
-    metadata: any
-): Promise<void> {
-    // Ensure customer exists before closing
-    if (!conversation.customerId) {
-        // Try to create customer from collected data
-        const allCollectedAnswers = collectAllAnswersFromMessages(conversation.messages);
-        const email = allCollectedAnswers.email?.value;
+    if (parseOutput.action === 'complete') {
+        conversation.status = 'closed';
+        const finalCollectedObj = collectedProfileArrayToObject(collectedProfile);
+        const email = finalCollectedObj.email;
 
         if (email && isValidEmail(normalizeEmail(email))) {
             try {
-                const normalizedEmail = normalizeEmail(email);
-                let customer = await Customer.findOne({ 'profile.email': normalizedEmail });
-
-                if (!customer) {
-                    const profileData = buildProfileFromAnswers(allCollectedAnswers);
-                    const attachmentIdsToAdd = extractAttachmentIdsFromAnswers(allCollectedAnswers);
-
-                    const validIds = attachmentIdsToAdd
-                        .filter(id => mongoose.Types.ObjectId.isValid(id))
-                        .map(id => new mongoose.Types.ObjectId(id));
-
-                    customer = new Customer({
-                        profile: profileData,
-                        attachments: validIds,
-                        meta: {
-                            createdFromConversation: conversation._id.toString(),
-                            createdAt: new Date()
-                        }
-                    });
-
-                    await customer.save();
-                    conversation.customerId = customer._id;
-
-                    logger.info(`Created customer ${customer._id} on completion`);
-                }
-            } catch (error: any) {
-                logger.error(`Failed to create customer on completion: ${error.message}`);
-            }
-        }
-    }
-
-    // Close conversation
-    conversation.status = 'closed';
-
-    // Send thank you email
-    if (conversation.customerId) {
-        try {
-            const customer = await Customer.findById(conversation.customerId)
-                .populate('attachments')
-                .lean();
-
-            const email = customer?.profile?.email;
-            if (email) {
-                await sendEmailSafe(
-                    sendThankYouEmail,
-                    email,
-                    customer.profile?.full_name || 'there',
-                    customer
+                await sendThankYouEmail(
+                    normalizeEmail(email),
+                    finalCollectedObj.full_name || 'there',
+                    finalCollectedObj
                 );
+                metadata.completed = true;
+            } catch (err: any) {
+                logger.warn('Failed to send thank-you email: ' + String(err));
             }
-
-            metadata.completed = true;
-            metadata.customerData = customer;
-
-            logger.info(`Conversation ${conversation._id} completed successfully`);
-        } catch (error: any) {
-            logger.error(`Failed to process completion: ${error.message}`);
         }
+        await conversation.save();
+        return { conversation, metadata };
     }
-}
 
-// ==================== BUILD PROFILE FROM ANSWERS ====================
+    // STEP 7: Get next question (using updated collected profile)
+    const nextQuestionResult = getNextQuestion(FORM_JSON2 as any, collectedProfile);
+    const nextField = nextQuestionResult.nextField;
 
-function buildProfileFromAnswers(answers: Record<string, any>): Record<string, any> {
-    const profile: Record<string, any> = {};
+    logger.info(`Next question: ${nextField?.questionId || 'none'}, isComplete: ${nextQuestionResult.isComplete}`);
 
-    Object.entries(answers).forEach(([questionId, data]) => {
-        const { value, type } = data;
+    // If no next field, ask for confirmation
+    if (!nextField || nextQuestionResult.isComplete) {
+        try {
+            const finalCollectedObj = collectedProfileArrayToObject(collectedProfile);
+            const confirmIn: LlmTurnInput = {
+                mode: 'confirm_summary',
+                field: null,
+                collectedData: finalCollectedObj,
+                lastUserMessage: null,
+                attachmentsMeta: []
+            };
+            const confirmOut = await callFormLlm(confirmIn);
 
-        if (value === null || value === undefined) return;
-
-        // Skip file fields - they go to attachments array ONLY
-        if (type === 'files') {
-            return;
+            const confirmMsg = createAssistantMessage(
+                confirmOut.assistantText || "I've collected all the information. Please review and confirm.",
+                {
+                    llmMode: 'confirm_summary',
+                    summary: finalCollectedObj
+                }
+            );
+            conversation.messages.push(confirmMsg);
+            conversation.messageCount = (conversation.messageCount || 0) + 1;
+            metadata.awaitingConfirmation = true;
+        } catch (err: any) {
+            logger.error('LLM confirm_summary failed: ' + String(err));
+            const fallbackMsg = createAssistantMessage(
+                "I've collected everything. Do you want to review or confirm?",
+                { llmMode: 'confirm_summary' }
+            );
+            conversation.messages.push(fallbackMsg);
+            conversation.messageCount = (conversation.messageCount || 0) + 1;
         }
-
-        // Store the value
-        profile[questionId] = value;
-    });
-
-    return profile;
-}
-
-function extractAttachmentIdsFromAnswers(answers: Record<string, any>): string[] {
-    const allIds: string[] = [];
-
-    Object.entries(answers).forEach(([_, data]) => {
-        const { value, type } = data;
-
-        if (type === 'files') {
-            const ids = extractAttachmentIdsFromValue(value);
-            allIds.push(...ids);
-        }
-    });
-
-    return Array.from(new Set(allIds)); // Deduplicate
-}
-
-function extractAttachmentIdsFromValue(value: any): string[] {
-    if (!value) return [];
-
-    // Single string ID
-    if (typeof value === 'string') {
-        return mongoose.Types.ObjectId.isValid(value) ? [value] : [];
+        await conversation.save();
+        return { conversation, metadata };
     }
 
-    // Array of IDs
-    if (Array.isArray(value)) {
-        return value
-            .map((item: any) => {
-                if (typeof item === 'string' && mongoose.Types.ObjectId.isValid(item)) {
-                    return item;
-                }
-                if (item?._id && mongoose.Types.ObjectId.isValid(item._id)) {
-                    return item._id.toString();
-                }
-                if (item?.id && mongoose.Types.ObjectId.isValid(item.id)) {
-                    return item.id.toString();
-                }
-                return null;
-            })
-            .filter(Boolean) as string[];
-    }
-
-    return [];
-}
-
-// ==================== UTILITIES ====================
-
-async function sendEmailSafe(emailFn: Function, ...args: any[]): Promise<void> {
-    if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-        logger.warn('SMTP not configured - email not sent');
-        return;
-    }
-
+    // STEP 8: Ask the next question
+    let askOutput: LlmTurnOutput | null = null;
     try {
-        await emailFn(...args);
-        logger.info('Email sent successfully');
-    } catch (error: any) {
-        logger.error(`Failed to send email: ${error.message}`);
+        const updatedCollectedObj = collectedProfileArrayToObject(collectedProfile);
+        const askInput: LlmTurnInput = {
+            mode: 'ask',
+            field: nextField,
+            collectedData: updatedCollectedObj,
+            lastUserMessage: null,
+            attachmentsMeta: []
+        };
+        askOutput = await callFormLlm(askInput);
+    } catch (err: any) {
+        logger.error('LLM ask failed: ' + String(err));
     }
+
+    const askText = askOutput?.assistantText ||
+        nextField?.context ||
+        nextField?.placeholder ||
+        'Could you provide this information?';
+
+    const askMsg = createAssistantMessage(
+        askText,
+        {
+            llmMode: 'ask',
+            field: nextField,
+            orderPath: nextQuestionResult.orderPath,
+            nextOrder: nextQuestionResult.nextOrder
+        },
+        nextField.questionId
+    );
+    conversation.messages.push(askMsg);
+    conversation.messageCount = (conversation.messageCount || 0) + 1;
+
+    // Update file stats
+    if (normalizedAttachmentIds.length > 0) {
+        if (!conversation.fileStats) {
+            (conversation as any).fileStats = { totalUploads: 0, uploadedTypes: [] };
+        }
+        conversation.fileStats!.totalUploads = (conversation.fileStats!.totalUploads || 0) + normalizedAttachmentIds.length;
+        const types = attachmentsMeta.map(a => a.type).filter(Boolean);
+        conversation.fileStats!.uploadedTypes = Array.from(
+            new Set([...(conversation.fileStats!.uploadedTypes || []), ...types])
+        );
+    }
+
+    await conversation.save();
+    await conversation.populate('messages.attachments');
+
+    return { conversation, metadata };
 }
 
 // ==================== QUERY FUNCTIONS ====================
@@ -653,7 +581,6 @@ export async function getDashboardStats(): Promise<{
         Conversation.countDocuments({ createdAt: { $gte: sevenDaysAgo } })
     ]);
 
-    // Count lead stages from customer profiles directly
     const customers = await Customer.find({ 'profile.leadStage': { $exists: true } })
         .select('profile.leadStage profile.lead_stage')
         .lean();
@@ -671,7 +598,9 @@ export async function getDashboardStats(): Promise<{
             if (leadStage === 'new_prospect') leadStages.newProspects++;
             else if (leadStage === 'marketing_qualified') leadStages.marketingQualified++;
             else if (leadStage === 'sales_qualified') leadStages.salesQualified++;
-            else if (leadStage === 'existing_customer' || leadStage === 'returning_customer') leadStages.existingCustomers++;
+            else if (leadStage === 'existing_customer' || leadStage === 'returning_customer') {
+                leadStages.existingCustomers++;
+            }
         }
     });
 
