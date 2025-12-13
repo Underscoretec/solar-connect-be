@@ -3,6 +3,10 @@ import { ICustomer } from "../interfaces";
 let Schema = mongoose.Schema;
 
 const customerSchema = new Schema<ICustomer>({
+    email: {
+        type: String,
+        default: null
+    },
     profile: {
         type: Schema.Types.Mixed,
         default: null

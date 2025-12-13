@@ -11,7 +11,6 @@ import { FORM_JSON2 } from '../../prompts/formJson';
 import { getNextQuestion } from './flowManager';
 import { buildProfileTree } from './buildProfileTree';
 import Customer from '../customers/model';
-import mongoose from 'mongoose';
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 
@@ -54,17 +53,6 @@ function createAssistantMessage(text: string, payload: any, questionId?: string)
     };
 }
 
-async function loadAttachmentsMeta(ids: string[] = []) {
-    if (!ids || ids.length === 0) return [];
-    const docs = await Attachment.find({ _id: { $in: ids } }).lean();
-    return docs.map(d => ({
-        id: d._id.toString(),
-        type: d.type,
-        mimeType: d.mimeType,
-        size: d.size
-    }));
-}
-
 /** Transform flat array of attachments into nested structure grouped by type */
 function transformAttachmentsToNestedStructure(
     attachments: AttachmentObject[],
@@ -90,19 +78,6 @@ function transformAttachmentsToNestedStructure(
     });
 
     return nested;
-}
-
-/** Convert collectedProfile array to object format for LLM */
-function collectedProfileArrayToObject(collectedProfile: any[]): Record<string, any> {
-    if (!Array.isArray(collectedProfile)) return {};
-    const obj: Record<string, any> = {};
-
-    for (const item of collectedProfile) {
-        if (item && item.questionId) {
-            obj[item.questionId] = item.value;
-        }
-    }
-    return obj;
 }
 
 /** Store collected answer with proper order path */
@@ -145,63 +120,6 @@ async function storeCollectedAnswer(
     logger.info(`Stored answer for ${questionId}: ${JSON.stringify(answer).substring(0, 100)}`);
 }
 
-/** Create or update customer when email is received */
-async function createOrUpdateCustomer(
-    collectedProfile: any[],
-    conversationId: string
-): Promise<string | null> {
-    const profileObj = collectedProfileArrayToObject(collectedProfile);
-    const email = profileObj.email;
-
-    if (!email || !isValidEmail(normalizeEmail(email))) {
-        return null;
-    }
-
-    const normalizedEmail = normalizeEmail(email);
-
-    try {
-        // Find existing customer by email
-        let customer = await Customer.findOne({ 'profile.email': normalizedEmail });
-
-        if (customer) {
-            // Update existing customer with new data
-            customer.profile = {
-                ...customer.profile,
-                ...profileObj,
-                email: normalizedEmail,
-                leadStage: customer.profile?.leadStage || 'returning_customer'
-            };
-            customer.meta = {
-                ...customer.meta,
-                lastConversationId: conversationId,
-                lastUpdated: new Date()
-            };
-            await customer.save();
-            logger.info(`Updated existing customer: ${customer._id}`);
-        } else {
-            // Create new customer
-            customer = new Customer({
-                profile: {
-                    ...profileObj,
-                    email: normalizedEmail,
-                    leadStage: 'new_prospect'
-                },
-                meta: {
-                    firstConversationId: conversationId,
-                    createdAt: new Date()
-                }
-            });
-            await customer.save();
-            logger.info(`Created new customer: ${customer._id}`);
-        }
-
-        return customer._id.toString();
-    } catch (err: any) {
-        logger.error('Failed to create/update customer: ' + String(err));
-        return null;
-    }
-}
-
 // ========== Main Functions ==========
 
 export async function createConversation(params: CreateConversationParams): Promise<IConversation> {
@@ -236,9 +154,8 @@ export async function createConversation(params: CreateConversationParams): Prom
     // Ask LLM to produce the first question
     try {
         const llmIn: LlmTurnInput = {
-            mode: 'ask',
             field: nextField,
-            collectedData: {},
+            collectedProfile: [],
             lastUserMessage: null,
             attachmentsMeta: []
         };
@@ -247,7 +164,12 @@ export async function createConversation(params: CreateConversationParams): Prom
         const assistantMessage = createAssistantMessage(
             out.assistantText || nextField.context || 'Hello! Let me collect some information from you.',
             {
-                llmMode: 'ask',
+                action: 'ask_question',
+                questionId: nextField.questionId,
+                assistantText: out.assistantText,
+                answer: null,
+                validation: null,
+                updateFields: [],
                 field: nextField,
                 orderPath: next.orderPath,
                 nextOrder: next.nextOrder
@@ -278,22 +200,6 @@ export async function sendMessageWithBusinessLogic(
     const normalizedAttachments = attachments || [];
     const attachmentIds = normalizedAttachments.map(a => a._id);
 
-    // Save user message
-    const userMessage = createUserMessage(
-        typeof userMessageText === 'string' ? userMessageText : JSON.stringify(userMessageText),
-        attachmentIds
-    );
-    conversation.messages.push(userMessage);
-    conversation.messageCount = (conversation.messageCount || 0) + 1;
-
-    // Prepare attachments metadata for LLM (legacy format for compatibility)
-    const attachmentsMeta = normalizedAttachments.map(a => ({
-        id: a._id,
-        type: a.type,
-        mimeType: a.mimeType,
-        size: a.size
-    }));
-
     // Ensure meta.collectedProfile exists
     if (!conversation.meta) conversation.meta = {};
     if (!conversation.meta.collectedProfile) conversation.meta.collectedProfile = [];
@@ -302,76 +208,113 @@ export async function sendMessageWithBusinessLogic(
         ? conversation.meta.collectedProfile
         : [];
 
-    // Get current question context (what was just asked)
+    // Check if we're in confirmation stage
     const allAssistantMessages = [...conversation.messages]
         .filter(m => m.role === 'assistant')
         .reverse();
-    const lastAskMessage = allAssistantMessages.find(m => m.payload?.llmMode === 'ask') as IMessage | undefined;
-    const currentQuestionId = lastAskMessage?.questionId || null;
-    const currentNextOrder = lastAskMessage?.payload?.nextOrder || null;
+    const lastMessage = allAssistantMessages[0];
+    const awaitingConfirmation = lastMessage?.payload?.awaitingConfirmation === true;
+
+    // ========== STEP A: Save User Message ==========
+    if (userMessageText !== null) {
+        const userMessage = createUserMessage(
+            typeof userMessageText === 'string' ? userMessageText : JSON.stringify(userMessageText),
+            attachmentIds
+        );
+        conversation.messages.push(userMessage);
+        conversation.messageCount = (conversation.messageCount || 0) + 1;
+    }
+
+    // ========== Handle Confirmation Stage ==========
+    if (awaitingConfirmation) {
+        // User is replying to confirmation
+        const userText = typeof userMessageText === 'string' ? userMessageText : JSON.stringify(userMessageText);
+
+        if (userText.toLowerCase().includes('confirm') || userText.toLowerCase().includes('submit') ||
+            userText.toLowerCase().includes('yes') || userText.toLowerCase().includes('looks good')) {
+            // User confirmed
+            conversation.status = 'closed';
+
+            const organizedProfile = buildProfileTree(collectedProfile);
+            const userName = organizedProfile.full_name?.value || 'there';
+            const userEmail = organizedProfile.email?.value;
+
+            if (userEmail && isValidEmail(normalizeEmail(userEmail))) {
+                try {
+                    if (!conversation.meta.thankYouEmailSent) {
+                        await sendThankYouEmail(
+                            normalizeEmail(userEmail),
+                            userName,
+                            organizedProfile
+                        );
+                        conversation.meta.thankYouEmailSent = true;
+                        metadata.thankYouEmailSent = true;
+                    }
+                } catch (err: any) {
+                    logger.warn('Failed to send thank-you email: ' + String(err));
+                }
+            }
+
+            const confirmMsg = createAssistantMessage(
+                `Thank you ${userName}! I've collected all the necessary information. Our team will review your details and reach out within 24 hours with a customized solar solution.`,
+                {
+                    action: 'complete',
+                    questionId: null,
+                    assistantText: `Thank you ${userName}! I've collected all the necessary information. Our team will review your details and reach out within 24 hours with a customized solar solution.`,
+                    answer: null,
+                    validation: null,
+                    updateFields: []
+                }
+            );
+            conversation.messages.push(confirmMsg);
+            conversation.messageCount = (conversation.messageCount || 0) + 1;
+            metadata.completed = true;
+            metadata.organizedProfile = organizedProfile;
+            await conversation.save();
+            return { conversation, metadata };
+        } else {
+            // User wants to update or unclear - treat as normal message
+            // Continue to normal flow below
+        }
+    }
+
+    // ========== STEP B: Call LLM for Parsing ==========
+    // Get current question context
+    const lastAskMessage = allAssistantMessages.find(m => m.payload?.action === 'ask_question') as IMessage | undefined;
     const currentField = lastAskMessage?.payload?.field || null;
+    const currentNextOrder = lastAskMessage?.payload?.nextOrder || null;
 
-    // Convert collected profile to object for LLM context
-    const collectedDataObj = collectedProfileArrayToObject(collectedProfile);
+    // Prepare attachments metadata for LLM
+    const attachmentsMeta = normalizedAttachments.map(a => ({
+        id: a._id,
+        type: a.type,
+        mimeType: a.mimeType,
+        size: a.size
+    }));
 
-    logger.info(`Processing message for question: ${currentQuestionId}, collectedSoFar: ${Object.keys(collectedDataObj).join(', ')}`);
-
-    // Check if we're awaiting confirmation (last message was confirm_summary)
-    const awaitingConfirmation = lastAskMessage?.payload?.llmMode === 'confirm_summary';
-
-    // STEP 1: Parse user's response (or handle confirmation reply)
     let parseOutput: LlmTurnOutput | null = null;
     try {
-        // If awaiting confirmation, use confirm_reply mode
-        if (awaitingConfirmation) {
-            const organizedProfile = buildProfileTree(collectedProfile);
-            const confirmReplyInput: LlmTurnInput = {
-                mode: 'confirm_reply',
-                field: null,
-                collectedData: organizedProfile,
-                lastUserMessage: typeof userMessageText === 'string' ? userMessageText : JSON.stringify(userMessageText),
-                attachmentsMeta: []
-            };
-            parseOutput = await callFormLlm(confirmReplyInput);
-            logger.info(`Confirm reply output: ${JSON.stringify(parseOutput).substring(0, 200)}`);
-        } else {
-            // Normal parse mode
-            const parseInput: LlmTurnInput = {
-                mode: 'parse',
-                field: currentField,
-                collectedData: collectedDataObj,
-                lastUserMessage: typeof userMessageText === 'string' ? userMessageText : JSON.stringify(userMessageText),
-                attachmentsMeta
-            };
-            parseOutput = await callFormLlm(parseInput);
-            logger.info(`Parse output: ${JSON.stringify(parseOutput).substring(0, 200)}`);
-        }
+        const parseInput: LlmTurnInput = {
+            field: currentField,
+            collectedProfile: collectedProfile,
+            lastUserMessage: typeof userMessageText === 'string' ? userMessageText : JSON.stringify(userMessageText),
+            attachmentsMeta
+        };
+        parseOutput = await callFormLlm(parseInput);
+        logger.info(`Parse output: ${JSON.stringify(parseOutput).substring(0, 200)}`);
     } catch (err: any) {
-        logger.error('LLM parse/confirm_reply failed: ' + String(err));
+        logger.error('LLM parse failed: ' + String(err));
         const errorMsg = createAssistantMessage(
             "I'm having trouble understanding that. Could you please rephrase your answer?",
-            { llmMode: 'error' },
-            currentQuestionId || ''
-        );
-        conversation.messages.push(errorMsg);
-        conversation.messageCount = (conversation.messageCount || 0) + 1;
-        await conversation.save();
-        return { conversation, metadata };
-    }
-
-    // STEP 2: Handle validation errors (but NOT if it's valid with answer)
-    if (parseOutput.validation && !parseOutput.validation.isValid) {
-        const errorText = parseOutput.assistantText ||
-            `I couldn't validate that answer. ${parseOutput.validation.errors?.join(', ') || 'Please try again.'}`;
-
-        const errorMsg = createAssistantMessage(
-            errorText,
             {
-                llmMode: 'validation_error',
-                errors: parseOutput.validation.errors,
-                field: currentField
+                action: 'clarify',
+                questionId: currentField?.questionId || null,
+                assistantText: "I'm having trouble understanding that. Could you please rephrase your answer?",
+                answer: null,
+                validation: { isValid: false, errors: ['parse_error'], normalized: null },
+                updateFields: []
             },
-            currentQuestionId || ''
+            currentField?.questionId || ''
         );
         conversation.messages.push(errorMsg);
         conversation.messageCount = (conversation.messageCount || 0) + 1;
@@ -379,28 +322,135 @@ export async function sendMessageWithBusinessLogic(
         return { conversation, metadata };
     }
 
-    // STEP 3: Determine if we should store the answer
-    const shouldStore = parseOutput.action === 'store_answer' ||
-        (parseOutput.validation?.isValid && parseOutput.answer !== undefined && parseOutput.answer !== null);
+    // ========== STEP C: Handle Different Actions ==========
 
-    logger.info(`Should store answer: ${shouldStore}, action: ${parseOutput.action}, isValid: ${parseOutput.validation?.isValid}, answer: ${parseOutput.answer}`);
+    // Action: clarify
+    if (parseOutput.action === 'clarify') {
+        const clarifyMsg = createAssistantMessage(
+            parseOutput.assistantText,
+            {
+                action: 'clarify',
+                questionId: parseOutput.questionId,
+                assistantText: parseOutput.assistantText,
+                answer: null,
+                validation: parseOutput.validation,
+                updateFields: []
+            },
+            parseOutput.questionId || ''
+        );
+        conversation.messages.push(clarifyMsg);
+        conversation.messageCount = (conversation.messageCount || 0) + 1;
+        await conversation.save();
+        return { conversation, metadata };
+    }
 
-    // STEP 4: Save the assistant's acknowledgment (BEFORE storing to avoid re-asking)
-    const ackText = parseOutput.assistantText || "Got it, thanks!";
-    const ackMsg = createAssistantMessage(
-        ackText,
-        {
-            llmMode: 'parse',
-            parseResult: parseOutput
-        },
-        parseOutput.questionId || currentQuestionId || ''
-    );
-    conversation.messages.push(ackMsg);
-    conversation.messageCount = (conversation.messageCount || 0) + 1;
+    // Action: update_answer
+    if (parseOutput.action === 'update_answer') {
+        const updateMsg = createAssistantMessage(
+            parseOutput.assistantText,
+            {
+                action: 'update_answer',
+                questionId: parseOutput.questionId,
+                assistantText: parseOutput.assistantText,
+                answer: null,
+                validation: null,
+                updateFields: parseOutput.updateFields || []
+            },
+            parseOutput.questionId || ''
+        );
+        conversation.messages.push(updateMsg);
+        conversation.messageCount = (conversation.messageCount || 0) + 1;
+        // Future: handle update logic here
+        await conversation.save();
+        return { conversation, metadata };
+    }
 
-    // STEP 5: Store the valid answer if we should
-    if (shouldStore) {
-        const qId = parseOutput.questionId || currentQuestionId;
+    // Action: go_back
+    if (parseOutput.action === 'go_back') {
+        const goBackMsg = createAssistantMessage(
+            parseOutput.assistantText,
+            {
+                action: 'go_back',
+                questionId: null,
+                assistantText: parseOutput.assistantText,
+                answer: null,
+                validation: null,
+                updateFields: []
+            }
+        );
+        conversation.messages.push(goBackMsg);
+        conversation.messageCount = (conversation.messageCount || 0) + 1;
+
+        // Remove last entry from collectedProfile
+        if (collectedProfile.length > 0) {
+            collectedProfile.pop();
+            conversation.meta.collectedProfile = collectedProfile;
+            conversation.markModified('meta');
+            conversation.markModified('meta.collectedProfile');
+        }
+
+        // Recompute next question
+        const nextQuestionResult = getNextQuestion(FORM_JSON2 as any, collectedProfile);
+        const nextField = nextQuestionResult.nextField;
+
+        if (nextField) {
+            // Ask the previous question
+            const askInput: LlmTurnInput = {
+                field: nextField,
+                collectedProfile: collectedProfile,
+                lastUserMessage: null,
+                attachmentsMeta: []
+            };
+            const askOutput = await callFormLlm(askInput);
+
+            const askMsg = createAssistantMessage(
+                askOutput.assistantText || nextField.context || 'Could you provide this information?',
+                {
+                    action: 'ask_question',
+                    questionId: nextField.questionId,
+                    assistantText: askOutput.assistantText || nextField.context || 'Could you provide this information?',
+                    answer: null,
+                    validation: null,
+                    updateFields: [],
+                    field: nextField,
+                    orderPath: nextQuestionResult.orderPath,
+                    nextOrder: nextQuestionResult.nextOrder
+                },
+                nextField.questionId
+            );
+            conversation.messages.push(askMsg);
+            conversation.messageCount = (conversation.messageCount || 0) + 1;
+        }
+
+        // Rebuild customer profile and update
+        const tree = buildProfileTree(collectedProfile);
+        if (conversation.customerId) {
+            try {
+                const customer = await Customer.findById(conversation.customerId);
+                if (customer) {
+                    customer.profile = {
+                        ...customer.profile,
+                        ...tree
+                    };
+                    customer.meta = {
+                        ...customer.meta,
+                        lastUpdated: new Date()
+                    };
+                    await customer.save();
+                }
+            } catch (err: any) {
+                logger.warn('Failed to update customer on go_back: ' + String(err));
+            }
+        }
+
+        await conversation.save();
+        return { conversation, metadata };
+    }
+
+    // Action: store_answer
+    if (parseOutput.action === 'store_answer') {
+        // ========== STEP C: Store the Answer ==========
+        const qId = parseOutput.questionId;
         let ans = parseOutput.answer ?? parseOutput.validation?.normalized ?? null;
 
         // SPECIAL: Transform file attachments into nested structure
@@ -418,127 +468,120 @@ export async function sendMessageWithBusinessLogic(
                 : [];
 
             logger.info(`Stored answer for ${qId}. Total collected: ${collectedProfile.length}`);
-
-            // SPECIAL: Handle email - create/update customer and send link
-            if (qId === 'email') {
-                try {
-                    const customerId = await createOrUpdateCustomer(collectedProfile, conversation._id.toString());
-                    if (customerId) {
-                        conversation.customerId = customerId as any;
-                        metadata.customerCreated = true;
-                    }
-
-                    const normalized = normalizeEmail(String(ans));
-                    if (isValidEmail(normalized)) {
-                        await sendConversationLinkEmail(
-                            normalized,
-                            `${FRONTEND_URL}/chat?conversationId=${conversation._id}`
-                        );
-                        metadata.emailSent = true;
-                        logger.info(`Sent conversation link to ${normalized}`);
-                    }
-                } catch (err: any) {
-                    logger.warn('Failed to process email: ' + String(err));
-                }
-            }
         }
-    }
 
-    // STEP 6: Handle completion/confirmation requests
-    if (parseOutput.action === 'request_confirmation') {
-        metadata.awaitingConfirmation = true;
-        await conversation.save();
-        return { conversation, metadata };
-    }
-
-    // Handle user wanting to update info during confirmation
-    if (parseOutput.confirmation?.status === 'changes') {
-        // User wants to update their info
-        // Save the assistant's message acknowledging the update request
-        const updateRequestMsg = createAssistantMessage(
-            parseOutput.assistantText || "What would you like to update?",
+        // Save assistant acknowledgment
+        const ackMsg = createAssistantMessage(
+            parseOutput.assistantText || "Got it, thanks!",
             {
-                llmMode: 'update_request',
-                confirmation: parseOutput.confirmation
-            }
+                action: 'store_answer',
+                questionId: parseOutput.questionId,
+                assistantText: parseOutput.assistantText || "Got it, thanks!",
+                answer: ans,
+                validation: parseOutput.validation,
+                updateFields: []
+            },
+            parseOutput.questionId || ''
         );
-        conversation.messages.push(updateRequestMsg);
+        conversation.messages.push(ackMsg);
         conversation.messageCount = (conversation.messageCount || 0) + 1;
-        metadata.updateRequested = true;
 
-        // If specific fields are mentioned, update them
-        if (parseOutput.confirmation.updatedFields && Object.keys(parseOutput.confirmation.updatedFields).length > 0) {
-            for (const [qId, value] of Object.entries(parseOutput.confirmation.updatedFields)) {
-                await storeCollectedAnswer(conversation, qId, value, null);
-            }
-            // Refresh collected profile
-            collectedProfile = Array.isArray(conversation.meta.collectedProfile)
-                ? conversation.meta.collectedProfile
-                : [];
-        }
+        // ========== STEP D: Build Customer Profile ==========
+        const tree = buildProfileTree(collectedProfile);
 
-        await conversation.save();
-        return { conversation, metadata };
-    }
-
-    if (parseOutput.action === 'complete') {
-        conversation.status = 'closed';
-
-        // Build organized profile tree
-        const organizedProfile = buildProfileTree(collectedProfile);
-
-        // Extract name from organized profile
-        const userName = organizedProfile.full_name?.value || 'there';
-
-        // Extract email from organized profile
-        const userEmail = organizedProfile.email?.value;
-
-        if (userEmail && isValidEmail(normalizeEmail(userEmail))) {
+        // ========== STEP E: Create or Update Customer ==========
+        if (conversation.customerId) {
+            // Update existing customer
             try {
-                await sendThankYouEmail(
-                    normalizeEmail(userEmail),
-                    userName,
-                    organizedProfile
-                );
-                metadata.completed = true;
+                const customer = await Customer.findById(conversation.customerId);
+                if (customer) {
+                    customer.profile = {
+                        ...customer.profile,
+                        ...tree
+                    };
+                    customer.meta = {
+                        ...customer.meta,
+                        lastConversationId: conversation._id.toString(),
+                        lastUpdated: new Date()
+                    };
+                    await customer.save();
+                    logger.info(`Updated existing customer: ${customer._id}`);
+                }
             } catch (err: any) {
-                logger.warn('Failed to send thank-you email: ' + String(err));
+                logger.warn('Failed to update customer: ' + String(err));
+            }
+        } else {
+
+            // Create new customer
+            const customer = new Customer({
+                profile: {
+                    ...tree,
+                    leadStage: 'new_prospect'
+                },
+                meta: {
+                    firstConversationId: conversationId,
+                    createdAt: new Date()
+                }
+            });
+            await customer.save();
+            logger.info(`Created new customer: ${customer._id}`);
+            if (customer) {
+                conversation.customerId = customer._id as any;
+                metadata.customerCreated = true;
             }
         }
 
-        metadata.organizedProfile = organizedProfile;
-        await conversation.save();
-        return { conversation, metadata };
-    }
+        // ========== STEP F: Update Conversation Meta ==========
+        conversation.meta.collectedProfile = collectedProfile;
+        conversation.markModified('meta');
+        conversation.markModified('meta.collectedProfile');
 
-    // STEP 7: Get next question (using updated collected profile)
-    const nextQuestionResult = getNextQuestion(FORM_JSON2 as any, collectedProfile);
-    const nextField = nextQuestionResult.nextField;
+        // ========== STEP G: Email Detection ==========
+        if (qId === 'email' && ans && !conversation.meta.conversationEmailSent) {
+            try {
+                const normalized = normalizeEmail(String(ans));
+                if (isValidEmail(normalized)) {
+                    const customer = await Customer.findById(conversation.customerId);
+                    if (customer) {
+                        customer.email = normalized;
+                        await customer.save();
+                        logger.info(`Updated customer email: ${customer._id}`);
+                    }
+                    await sendConversationLinkEmail(
+                        normalized,
+                        `${FRONTEND_URL}/chat?conversationId=${conversation._id}`
+                    );
+                    conversation.meta.conversationEmailSent = true;
+                    metadata.emailSent = true;
+                    logger.info(`Sent conversation link to ${normalized}`);
+                }
+            } catch (err: any) {
+                logger.warn('Failed to send conversation link email: ' + String(err));
+            }
+        }
 
-    logger.info(`Next question: ${nextField?.questionId || 'none'}, isComplete: ${nextQuestionResult.isComplete}`);
+        // ========== STEP H: Ask the Next Question ==========
+        const nextQuestionResult = getNextQuestion(FORM_JSON2 as any, collectedProfile);
+        const nextField = nextQuestionResult.nextField;
 
-    // If no next field, ask for confirmation
-    if (!nextField || nextQuestionResult.isComplete) {
-        try {
-            // Build organized profile tree for frontend display
+        logger.info(`Next question: ${nextField?.questionId || 'none'}, isComplete: ${nextQuestionResult.isComplete}`);
+
+        // If no next field, send final confirmation
+        if (!nextField || nextQuestionResult.isComplete) {
+            // Stop calling LLM - send final confirmation message
             const organizedProfile = buildProfileTree(collectedProfile);
-
-            // Extract name for personalization
             const userName = organizedProfile.full_name?.value || '';
 
-            const confirmIn: LlmTurnInput = {
-                mode: 'confirm_summary',
-                field: null,
-                collectedData: organizedProfile,
-                lastUserMessage: null,
-                attachmentsMeta: []
-            };
-            const confirmOut = await callFormLlm(confirmIn);
-
             const confirmMsg = createAssistantMessage(
-                confirmOut.assistantText || `Perfect${userName ? ', ' + userName : ''}! I've collected all your information. Please review the details shown below and click 'Submit' to confirm or 'I want to update my info' if you need to make any changes.`,
+                `Perfect${userName ? ', ' + userName : ''}! I've collected all your information. Please review the details shown below and click 'Submit' to confirm or 'I want to update my info' if you need to make any changes.`,
                 {
-                    llmMode: 'confirm_summary',
+                    action: null,
+                    questionId: null,
+                    assistantText: `Perfect${userName ? ', ' + userName : ''}! I've collected all your information. Please review the details shown below and click 'Submit' to confirm or 'I want to update my info' if you need to make any changes.`,
+                    answer: null,
+                    validation: null,
+                    updateFields: [],
+                    awaitingConfirmation: true,
                     organizedProfile: organizedProfile,
                     completionMessage: nextQuestionResult.completionMessage
                 }
@@ -547,60 +590,42 @@ export async function sendMessageWithBusinessLogic(
             conversation.messageCount = (conversation.messageCount || 0) + 1;
             metadata.awaitingConfirmation = true;
             metadata.organizedProfile = organizedProfile;
-        } catch (err: any) {
-            logger.error('LLM confirm_summary failed: ' + String(err));
-            // Fallback with organized profile
-            const organizedProfile = buildProfileTree(collectedProfile);
-            const userName = organizedProfile.full_name?.value || '';
-            const fallbackMsg = createAssistantMessage(
-                `I've collected everything${userName ? ', ' + userName : ''}. Please review and click 'Submit' to confirm or 'I want to update my info' to make changes.`,
-                {
-                    llmMode: 'confirm_summary',
-                    organizedProfile: organizedProfile,
-                    completionMessage: nextQuestionResult.completionMessage
-                }
-            );
-            conversation.messages.push(fallbackMsg);
-            conversation.messageCount = (conversation.messageCount || 0) + 1;
-            metadata.organizedProfile = organizedProfile;
+            await conversation.save();
+            return { conversation, metadata };
         }
-        await conversation.save();
-        return { conversation, metadata };
-    }
 
-    // STEP 8: Ask the next question
-    let askOutput: LlmTurnOutput | null = null;
-    try {
-        const updatedCollectedObj = collectedProfileArrayToObject(collectedProfile);
+        // Ask the next question
         const askInput: LlmTurnInput = {
-            mode: 'ask',
             field: nextField,
-            collectedData: updatedCollectedObj,
+            collectedProfile: collectedProfile,
             lastUserMessage: null,
             attachmentsMeta: []
         };
-        askOutput = await callFormLlm(askInput);
-    } catch (err: any) {
-        logger.error('LLM ask failed: ' + String(err));
+        const askOutput = await callFormLlm(askInput);
+
+        const askText = askOutput.assistantText ||
+            nextField?.context ||
+            nextField?.placeholder ||
+            'Could you provide this information?';
+
+        const askMsg = createAssistantMessage(
+            askText,
+            {
+                action: 'ask_question',
+                questionId: nextField.questionId,
+                assistantText: askText,
+                answer: null,
+                validation: null,
+                updateFields: [],
+                field: nextField,
+                orderPath: nextQuestionResult.orderPath,
+                nextOrder: nextQuestionResult.nextOrder
+            },
+            nextField.questionId
+        );
+        conversation.messages.push(askMsg);
+        conversation.messageCount = (conversation.messageCount || 0) + 1;
     }
-
-    const askText = askOutput?.assistantText ||
-        nextField?.context ||
-        nextField?.placeholder ||
-        'Could you provide this information?';
-
-    const askMsg = createAssistantMessage(
-        askText,
-        {
-            llmMode: 'ask',
-            field: nextField,
-            orderPath: nextQuestionResult.orderPath,
-            nextOrder: nextQuestionResult.nextOrder
-        },
-        nextField.questionId
-    );
-    conversation.messages.push(askMsg);
-    conversation.messageCount = (conversation.messageCount || 0) + 1;
 
     // Update file stats
     if (normalizedAttachments.length > 0) {

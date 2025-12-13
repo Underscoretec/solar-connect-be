@@ -4,13 +4,15 @@ import { SYSTEM_PROMPT } from "../../prompts/systemPrompt";
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-export type LlmMode = "ask" | "parse" | "confirm_summary" | "confirm_reply";
-
 export interface LlmTurnInput {
-  mode: LlmMode;
   field: any | null; // the field object from FORM_JSON2 (or null)
-  collectedData: Record<string, any>;
-  lastUserMessage: string | null;
+  collectedProfile: Array<{ // Pass the array directly
+    id: string;
+    order?: string;
+    questionId: string;
+    value: any;
+  }>;
+  lastUserMessage: string | null; // null = asking, non-null = parsing
   attachmentsMeta?: {
     id: string;
     type: string;
@@ -20,27 +22,27 @@ export interface LlmTurnInput {
 }
 
 export interface LlmTurnOutput {
-  mode: LlmMode;
-  questionId?: string | null;
+  action: "ask_question" | "store_answer" | "clarify" | "update_answer" | "go_back" | null;
+  questionId: string | null;
   assistantText: string;
   answer?: any | null;
   validation?: {
     isValid: boolean;
     errors: string[];
     normalized?: any;
-  };
-  action?: "store_answer" | "request_confirmation" | "complete" | null;
-  confirmation?: {
-    status: "confirmed" | "changes" | "unclear";
-    updatedFields?: Record<string, any>;
-  };
+  } | null;
+  updateFields?: Array<{
+    id: string;
+    order?: string;
+    questionId: string;
+    value: any;
+  }>;
 }
 
 export async function callFormLlm(input: LlmTurnInput): Promise<LlmTurnOutput> {
   const userPayload = {
-    mode: input.mode,
     field: input.field,
-    collectedData: input.collectedData,
+    collectedProfile: input.collectedProfile,
     lastUserMessage: input.lastUserMessage,
     attachmentsMeta: input.attachmentsMeta || null,
   };
@@ -49,7 +51,7 @@ export async function callFormLlm(input: LlmTurnInput): Promise<LlmTurnOutput> {
 
   // Use chat completion; system prompt instructs strict JSON output
   const resp = await client.chat.completions.create({
-    model: "gpt-4o",
+    model: "gpt-4o-mini",
     temperature: 0.12,
     messages: [
       { role: "system", content: SYSTEM_PROMPT },
@@ -79,11 +81,12 @@ export async function callFormLlm(input: LlmTurnInput): Promise<LlmTurnOutput> {
   console.log('parsed', parsed);
 
   // Ensure certain fields exist
-  parsed.mode = parsed.mode || input.mode;
-  parsed.assistantText = parsed.assistantText || (parsed.action === "complete" ? "Thanks — done." : "Sorry, I couldn't process that.");
-  if (input.field && !parsed.questionId) {
-    parsed.questionId = input.field.questionId || null;
-  }
+  parsed.action = parsed.action || null;
+  parsed.assistantText = parsed.assistantText || "Sorry, I couldn't process that.";
+  parsed.questionId = parsed.questionId || (input.field?.questionId || null);
+  parsed.answer = parsed.answer !== undefined ? parsed.answer : null;
+  parsed.validation = parsed.validation || null;
+  parsed.updateFields = parsed.updateFields || [];
 
   return parsed;
 }

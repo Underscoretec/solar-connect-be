@@ -141,50 +141,6 @@ export async function updateCustomerProfile(
     );
 }
 
-export async function extractCustomerDataFromMessage(
-    message: string,
-    existingData: Record<string, any> = {}
-): Promise<Record<string, any>> {
-    const extracted: Record<string, any> = { ...existingData };
-
-    // Extract email
-    const emailRegex = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g;
-    const emailMatch = message.match(emailRegex);
-    if (emailMatch && !extracted.email) {
-        extracted.email = emailMatch[0];
-    }
-
-    // Extract phone (Indian and international formats)
-    const phoneRegex = /(\+91[\s-]?)?[6-9]\d{9}|\b\d{10}\b/g;
-    const phoneMatch = message.match(phoneRegex);
-    if (phoneMatch && !extracted.phone) {
-        extracted.phone = phoneMatch[0].replace(/\s|-/g, '');
-    }
-
-    // Extract ZIP code (5-7 digits)
-    const zipRegex = /\b\d{5,7}\b/g;
-    const zipMatch = message.match(zipRegex);
-    if (zipMatch && !extracted.zipCode) {
-        extracted.zipCode = zipMatch[0];
-    }
-
-    // Try to extract name (if message starts with "I am" or "My name is")
-    const namePatterns = [
-        /(?:my name is|i am|i'm|this is)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/i,
-        /^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/,
-    ];
-
-    for (const pattern of namePatterns) {
-        const nameMatch = message.match(pattern);
-        if (nameMatch && !extracted.name) {
-            extracted.name = nameMatch[1];
-            break;
-        }
-    }
-
-    return extracted;
-}
-
 export async function getCustomersList(params: {
     page?: number;
     limit?: number;
