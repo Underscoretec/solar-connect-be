@@ -2,13 +2,12 @@
 import config from '../../config';
 import logger from '../logger';
 import Conversation from './model';
-import Attachment from '../attachments/model';
 import { sendConversationLinkEmail, sendThankYouEmail } from '../../lib/mail';
 import { normalizeEmail, isValidEmail } from '../../lib/helpers';
 import { IConversation, IMessage } from '../interfaces';
 import { callFormLlm, LlmTurnInput, LlmTurnOutput } from './openAiHanlder';
 import { FORM_JSON2 } from '../../prompts/formJson';
-import { getNextQuestion } from './flowManager';
+import { getNextQuestion, removeAnswerWithChildren } from './flowManager';
 import { buildProfileTree } from './buildProfileTree';
 import Customer from '../customers/model';
 
@@ -78,6 +77,15 @@ function transformAttachmentsToNestedStructure(
     });
 
     return nested;
+}
+
+/** Extract and format last 3 messages for LLM context */
+function getLast3Messages(messages: IMessage[]): Array<{ role: "user" | "assistant" | "system"; text: string }> {
+    const last3 = messages.slice(-3);
+    return last3.map(msg => ({
+        role: msg.role,
+        text: msg.text || ''
+    }));
 }
 
 /** Store collected answer with proper order path */
@@ -157,7 +165,8 @@ export async function createConversation(params: CreateConversationParams): Prom
             field: nextField,
             collectedProfile: [],
             lastUserMessage: null,
-            attachmentsMeta: []
+            attachmentsMeta: [],
+            last3Messages: []
         };
         const out = await callFormLlm(llmIn);
 
@@ -166,7 +175,6 @@ export async function createConversation(params: CreateConversationParams): Prom
             {
                 action: 'ask_question',
                 questionId: nextField.questionId,
-                assistantText: out.assistantText,
                 answer: null,
                 validation: null,
                 updateFields: [],
@@ -191,7 +199,8 @@ export async function createConversation(params: CreateConversationParams): Prom
 export async function sendMessageWithBusinessLogic(
     conversationId: string,
     userMessageText: string | null,
-    attachments: AttachmentObject[] = []
+    attachments: AttachmentObject[] = [],
+    isConformed: boolean = false
 ): Promise<{ conversation: IConversation; metadata: any }> {
     const conversation = await Conversation.findById(conversationId).populate('messages.attachments');
     if (!conversation) throw new Error('Conversation not found');
@@ -226,56 +235,48 @@ export async function sendMessageWithBusinessLogic(
     }
 
     // ========== Handle Confirmation Stage ==========
-    if (awaitingConfirmation) {
-        // User is replying to confirmation
-        const userText = typeof userMessageText === 'string' ? userMessageText : JSON.stringify(userMessageText);
+    if (awaitingConfirmation && isConformed) {
+        // User confirmed
+        conversation.status = 'closed';
+        metadata.completed = true;
+        const customer = await Customer.findById(conversation.customerId);
 
-        if (userText.toLowerCase().includes('confirm') || userText.toLowerCase().includes('submit') ||
-            userText.toLowerCase().includes('yes') || userText.toLowerCase().includes('looks good')) {
-            // User confirmed
-            conversation.status = 'closed';
+        const organizedProfile = customer?.profile;
+        const userName = organizedProfile?.full_name?.value || 'there';
+        const userEmail = customer?.email;
 
-            const organizedProfile = buildProfileTree(collectedProfile);
-            const userName = organizedProfile.full_name?.value || 'there';
-            const userEmail = organizedProfile.email?.value;
-
-            if (userEmail && isValidEmail(normalizeEmail(userEmail))) {
-                try {
-                    if (!conversation.meta.thankYouEmailSent) {
-                        await sendThankYouEmail(
-                            normalizeEmail(userEmail),
-                            userName,
-                            organizedProfile
-                        );
-                        conversation.meta.thankYouEmailSent = true;
-                        metadata.thankYouEmailSent = true;
-                    }
-                } catch (err: any) {
-                    logger.warn('Failed to send thank-you email: ' + String(err));
+        if (userEmail) {
+            try {
+                if (!conversation.meta.thankYouEmailSent) {
+                    await sendThankYouEmail(
+                        normalizeEmail(userEmail),
+                        userName,
+                        organizedProfile
+                    );
+                    conversation.meta.thankYouEmailSent = true;
+                    metadata.thankYouEmailSent = true;
                 }
+            } catch (err: any) {
+                logger.warn('Failed to send thank-you email: ' + String(err));
             }
-
-            const confirmMsg = createAssistantMessage(
-                `Thank you ${userName}! I've collected all the necessary information. Our team will review your details and reach out within 24 hours with a customized solar solution.`,
-                {
-                    action: 'complete',
-                    questionId: null,
-                    assistantText: `Thank you ${userName}! I've collected all the necessary information. Our team will review your details and reach out within 24 hours with a customized solar solution.`,
-                    answer: null,
-                    validation: null,
-                    updateFields: []
-                }
-            );
-            conversation.messages.push(confirmMsg);
-            conversation.messageCount = (conversation.messageCount || 0) + 1;
-            metadata.completed = true;
-            metadata.organizedProfile = organizedProfile;
-            await conversation.save();
-            return { conversation, metadata };
-        } else {
-            // User wants to update or unclear - treat as normal message
-            // Continue to normal flow below
         }
+
+        const confirmMsg = createAssistantMessage(
+            `Thank you ${userName}! I've collected all the necessary information. Our team will review your details and reach out within 24 hours with a customized solar solution.`,
+            {
+                action: 'complete',
+                questionId: null,
+                answer: null,
+                validation: null,
+                updateFields: []
+            }
+        );
+        conversation.messages.push(confirmMsg);
+        conversation.messageCount = (conversation.messageCount || 0) + 1;
+        metadata.completed = true;
+        metadata.organizedProfile = organizedProfile;
+        await conversation.save();
+        return { conversation, metadata };
     }
 
     // ========== STEP B: Call LLM for Parsing ==========
@@ -292,13 +293,17 @@ export async function sendMessageWithBusinessLogic(
         size: a.size
     }));
 
+    // Extract last 3 messages for LLM context
+    const last3Messages = getLast3Messages(conversation.messages);
+
     let parseOutput: LlmTurnOutput | null = null;
     try {
         const parseInput: LlmTurnInput = {
             field: currentField,
             collectedProfile: collectedProfile,
             lastUserMessage: typeof userMessageText === 'string' ? userMessageText : JSON.stringify(userMessageText),
-            attachmentsMeta
+            attachmentsMeta,
+            last3Messages
         };
         parseOutput = await callFormLlm(parseInput);
         logger.info(`Parse output: ${JSON.stringify(parseOutput).substring(0, 200)}`);
@@ -309,7 +314,6 @@ export async function sendMessageWithBusinessLogic(
             {
                 action: 'clarify',
                 questionId: currentField?.questionId || null,
-                assistantText: "I'm having trouble understanding that. Could you please rephrase your answer?",
                 answer: null,
                 validation: { isValid: false, errors: ['parse_error'], normalized: null },
                 updateFields: []
@@ -331,7 +335,6 @@ export async function sendMessageWithBusinessLogic(
             {
                 action: 'clarify',
                 questionId: parseOutput.questionId,
-                assistantText: parseOutput.assistantText,
                 answer: null,
                 validation: parseOutput.validation,
                 updateFields: []
@@ -351,7 +354,6 @@ export async function sendMessageWithBusinessLogic(
             {
                 action: 'update_answer',
                 questionId: parseOutput.questionId,
-                assistantText: parseOutput.assistantText,
                 answer: null,
                 validation: null,
                 updateFields: parseOutput.updateFields || []
@@ -360,7 +362,94 @@ export async function sendMessageWithBusinessLogic(
         );
         conversation.messages.push(updateMsg);
         conversation.messageCount = (conversation.messageCount || 0) + 1;
-        // Future: handle update logic here
+
+        // Handle update logic: remove the answer and its children
+        if (parseOutput.updateFields && parseOutput.updateFields.length > 0) {
+            const updateField = parseOutput.updateFields[0]; // Get first field to update
+            const targetId = updateField.id;
+            const targetQuestionId = updateField.questionId;
+
+            // Remove answer with children using removeAnswerWithChildren
+            const updatedCollectedProfile = removeAnswerWithChildren(
+                collectedProfile,
+                targetId,
+                targetQuestionId
+            );
+
+            // Update conversation's collectedProfile
+            conversation.meta.collectedProfile = updatedCollectedProfile;
+            conversation.markModified('meta');
+            conversation.markModified('meta.collectedProfile');
+
+            // Refresh collected profile
+            collectedProfile = updatedCollectedProfile;
+
+            // If conversation status is 'closed', change to 'open' (reopened)
+            if (conversation.status === 'closed') {
+                conversation.status = 'open';
+                metadata.statusChanged = true;
+            }
+
+            // If thankYouEmailSent is true, set to false
+            if (conversation.meta.thankYouEmailSent === true) {
+                conversation.meta.thankYouEmailSent = false;
+            }
+
+            // Rebuild customer profile and update
+            const tree = buildProfileTree(collectedProfile);
+            if (conversation.customerId) {
+                try {
+                    const customer = await Customer.findById(conversation.customerId);
+                    if (customer) {
+                        customer.profile = {
+                            ...customer.profile,
+                            ...tree
+                        };
+                        customer.meta = {
+                            ...customer.meta,
+                            lastUpdated: new Date()
+                        };
+                        await customer.save();
+                    }
+                } catch (err: any) {
+                    logger.warn('Failed to update customer on update_answer: ' + String(err));
+                }
+            }
+
+            // Find next question
+            const nextQuestionResult = getNextQuestion(FORM_JSON2 as any, collectedProfile);
+            const nextField = nextQuestionResult.nextField;
+
+            if (nextField) {
+                // Ask the next question
+                const askInput: LlmTurnInput = {
+                    field: nextField,
+                    collectedProfile: collectedProfile,
+                    lastUserMessage: null,
+                    attachmentsMeta: [],
+                    last3Messages: getLast3Messages(conversation.messages)
+                };
+                const askOutput = await callFormLlm(askInput);
+
+                const askMsg = createAssistantMessage(
+                    askOutput.assistantText || nextField.context || 'Could you provide this information?',
+                    {
+                        action: 'ask_question',
+                        questionId: nextField.questionId,
+                        answer: null,
+                        validation: null,
+                        updateFields: [],
+                        field: nextField,
+                        orderPath: nextQuestionResult.orderPath,
+                        nextOrder: nextQuestionResult.nextOrder
+                    },
+                    nextField.questionId
+                );
+                conversation.messages.push(askMsg);
+                conversation.messageCount = (conversation.messageCount || 0) + 1;
+            }
+        }
+
         await conversation.save();
         return { conversation, metadata };
     }
@@ -372,7 +461,6 @@ export async function sendMessageWithBusinessLogic(
             {
                 action: 'go_back',
                 questionId: null,
-                assistantText: parseOutput.assistantText,
                 answer: null,
                 validation: null,
                 updateFields: []
@@ -399,7 +487,8 @@ export async function sendMessageWithBusinessLogic(
                 field: nextField,
                 collectedProfile: collectedProfile,
                 lastUserMessage: null,
-                attachmentsMeta: []
+                attachmentsMeta: [],
+                last3Messages: getLast3Messages(conversation.messages)
             };
             const askOutput = await callFormLlm(askInput);
 
@@ -408,7 +497,6 @@ export async function sendMessageWithBusinessLogic(
                 {
                     action: 'ask_question',
                     questionId: nextField.questionId,
-                    assistantText: askOutput.assistantText || nextField.context || 'Could you provide this information?',
                     answer: null,
                     validation: null,
                     updateFields: [],
@@ -476,7 +564,6 @@ export async function sendMessageWithBusinessLogic(
             {
                 action: 'store_answer',
                 questionId: parseOutput.questionId,
-                assistantText: parseOutput.assistantText || "Got it, thanks!",
                 answer: ans,
                 validation: parseOutput.validation,
                 updateFields: []
@@ -577,7 +664,6 @@ export async function sendMessageWithBusinessLogic(
                 {
                     action: null,
                     questionId: null,
-                    assistantText: `Perfect${userName ? ', ' + userName : ''}! I've collected all your information. Please review the details shown below and click 'Submit' to confirm or 'I want to update my info' if you need to make any changes.`,
                     answer: null,
                     validation: null,
                     updateFields: [],
@@ -599,7 +685,8 @@ export async function sendMessageWithBusinessLogic(
             field: nextField,
             collectedProfile: collectedProfile,
             lastUserMessage: null,
-            attachmentsMeta: []
+            attachmentsMeta: [],
+            last3Messages: getLast3Messages(conversation.messages)
         };
         const askOutput = await callFormLlm(askInput);
 
@@ -613,7 +700,6 @@ export async function sendMessageWithBusinessLogic(
             {
                 action: 'ask_question',
                 questionId: nextField.questionId,
-                assistantText: askText,
                 answer: null,
                 validation: null,
                 updateFields: [],

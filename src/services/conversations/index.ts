@@ -187,13 +187,14 @@ router.put("/:id/customer", async (req, res) => {
  */
 router.post('/:id/message', async (req, res) => {
     const conversationId = req.params.id;
-    const { text, attachments } = req.body;
+    const { text, attachments, isConformed } = req.body;
 
     try {
         const { conversation, metadata } = await controllers.sendMessageWithBusinessLogic(
             conversationId,
             text,
-            attachments // Array of attachment objects
+            attachments,
+            isConformed
         );
 
         // Build response with conversation and metadata

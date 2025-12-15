@@ -19,6 +19,10 @@ export interface LlmTurnInput {
     mimeType?: string;
     size?: number;
   }[];
+  last3Messages?: Array<{
+    role: "user" | "assistant" | "system";
+    text: string;
+  }>;
 }
 
 export interface LlmTurnOutput {
@@ -45,6 +49,7 @@ export async function callFormLlm(input: LlmTurnInput): Promise<LlmTurnOutput> {
     collectedProfile: input.collectedProfile,
     lastUserMessage: input.lastUserMessage,
     attachmentsMeta: input.attachmentsMeta || null,
+    last3Messages: input.last3Messages || null,
   };
 
   console.log('userPayload', userPayload);

@@ -478,3 +478,44 @@ export function getNextQuestion(formJson: FormJson, collected: CollectedItem[]):
     completionMessage: isComplete ? formJson.completion : undefined,
   };
 }
+
+
+
+
+type AnswerItem = {
+  id: string;
+  order: string;
+  questionId: string;
+  value: any;
+};
+
+export function removeAnswerWithChildren(
+  answers: AnswerItem[],
+  targetId: string,
+  targetQuestionId: string
+): AnswerItem[] {
+  // Step 1: find the target object
+  const target = answers.find(
+    item => item.id === targetId && item.questionId === targetQuestionId
+  );
+
+  // If not found, return original array
+  if (!target) return answers;
+
+  const targetOrder = target.order;
+
+  // Step 2: filter out target + all its children
+  return answers.filter(item => {
+    // remove exact match
+    if (item.id === targetId && item.questionId === targetQuestionId) {
+      return false;
+    }
+
+    // remove children (7:*, 7:4:*, etc.)
+    if (item.order.startsWith(`${targetOrder}:`)) {
+      return false;
+    }
+
+    return true;
+  });
+}
