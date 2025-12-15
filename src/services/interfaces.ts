@@ -66,6 +66,7 @@ export interface DecodeTokenPayload extends JwtPayload {
 export interface ICustomer extends MongooseDocument {
   _id: Types.ObjectId;
   email?: string;
+  fullName?: string;
   profile?: Record<string, any>;
   attachments?: Types.ObjectId[];
   meta?: Record<string, any>;

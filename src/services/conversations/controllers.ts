@@ -5,7 +5,7 @@ import Conversation from './model';
 import { sendConversationLinkEmail, sendThankYouEmail } from '../../lib/mail';
 import { normalizeEmail, isValidEmail } from '../../lib/helpers';
 import { IConversation, IMessage } from '../interfaces';
-import { callFormLlm, LlmTurnInput, LlmTurnOutput } from './openAiHanlder';
+import { callFormLlm, LlmTurnInput, LlmTurnOutput } from './llm';
 import { FORM_JSON2 } from '../../prompts/formJson';
 import { getNextQuestion, removeAnswerWithChildren } from './flowManager';
 import { buildProfileTree } from './buildProfileTree';
@@ -267,36 +267,35 @@ export async function sendMessageWithBusinessLogic(
     if (awaitingConfirmation && isConformed) {
         // User confirmed
         conversation.status = 'closed';
-        metadata.completed = true;
+        metadata.isCompleted = true;
         const customer = await Customer.findById(conversation.customerId);
 
         const organizedProfile = customer?.profile;
-        const userName = organizedProfile?.full_name?.value || 'there';
+        const userName = customer?.fullName || 'there';
         const userEmail = customer?.email;
 
         if (userEmail) {
             try {
-                if (!conversation.meta.thankYouEmailSent) {
+                if (conversation.meta.statusChanged) {
+                    //send update email
                     await sendThankYouEmail(
                         normalizeEmail(userEmail),
                         userName,
                         organizedProfile
                     );
-                    conversation.meta.thankYouEmailSent = true;
-                    metadata.thankYouEmailSent = true;
+                } else {
+                    //send first time email
+                    await sendThankYouEmail(
+                        normalizeEmail(userEmail),
+                        userName,
+                        organizedProfile
+                    );
                 }
             } catch (err: any) {
                 logger.warn('Failed to send thank-you email: ' + String(err));
             }
         }
-        if (userMessageText !== null) {
-            const userMessage = createUserMessage(
-                typeof userMessageText === 'string' ? userMessageText : JSON.stringify(userMessageText),
-                attachmentIds
-            );
-            conversation.messages.push(userMessage);
-            conversation.messageCount = (conversation.messageCount || 0) + 1;
-        }
+
         const confirmMsg = createAssistantMessage(
             `Thank you ${userName}! I've collected all the necessary information. Our team will review your details and reach out within 24 hours with a customized solar solution.`,
             {
@@ -309,8 +308,6 @@ export async function sendMessageWithBusinessLogic(
         );
         conversation.messages.push(confirmMsg);
         conversation.messageCount = (conversation.messageCount || 0) + 1;
-        metadata.completed = true;
-        metadata.organizedProfile = organizedProfile;
         await conversation.save();
         return { conversation, metadata };
     }
@@ -365,9 +362,6 @@ export async function sendMessageWithBusinessLogic(
     // ========== STEP C: Handle Different Actions ==========
 
     // Action: clarify
-    // Note: This handles general clarifications AND the first step of update flow
-    // When user wants to update but doesn't specify which field, LLM returns clarify with error "update_clarification_needed"
-    // On the next turn, when user clarifies which field, LLM will return update_answer action
     if (parseOutput.action === 'clarify') {
         const clarifyMsg = createAssistantMessage(
             parseOutput.assistantText,
@@ -376,7 +370,10 @@ export async function sendMessageWithBusinessLogic(
                 questionId: parseOutput.questionId,
                 answer: null,
                 validation: parseOutput.validation,
-                updateFields: []
+                updateFields: [],
+                field: parseOutput?.repeatQuestion ? lastAskMessage?.payload?.field : null,
+                orderPath: parseOutput?.repeatQuestion ? lastAskMessage?.payload?.orderPath : null,
+                nextOrder: parseOutput?.repeatQuestion ? lastAskMessage?.payload?.nextOrder : null
             },
             parseOutput.questionId || ''
         );
@@ -386,22 +383,14 @@ export async function sendMessageWithBusinessLogic(
         // If conversation status is 'closed', change to 'open' (reopened)
         if (conversation.status === 'closed') {
             conversation.status = 'open';
-            metadata.statusChanged = true;
+            conversation.meta.statusChanged = true;
         }
 
-        // If thankYouEmailSent is true, set to false
-        if (conversation.meta.thankYouEmailSent === true) {
-            conversation.meta.thankYouEmailSent = false;
-        }
         await conversation.save();
         return { conversation, metadata };
     }
 
     // Action: update_answer
-    // This is the second step of the update flow:
-    // 1. User expresses intent to update → LLM returns clarify (first step)
-    // 2. User clarifies which field → LLM returns update_answer with updateFields populated (this step)
-    // The LLM uses last3Messages context to see the previous clarification and identify the correct field
     if (parseOutput.action === 'update_answer') {
         const updateMsg = createAssistantMessage(
             parseOutput.assistantText,
@@ -441,13 +430,9 @@ export async function sendMessageWithBusinessLogic(
             // If conversation status is 'closed', change to 'open' (reopened)
             if (conversation.status === 'closed') {
                 conversation.status = 'open';
-                metadata.statusChanged = true;
+                conversation.meta.statusChanged = true;
             }
 
-            // If thankYouEmailSent is true, set to false
-            if (conversation.meta.thankYouEmailSent === true) {
-                conversation.meta.thankYouEmailSent = false;
-            }
 
             // Rebuild customer profile and update
             const tree = buildProfileTree(collectedProfile);
@@ -529,6 +514,12 @@ export async function sendMessageWithBusinessLogic(
             conversation.meta.collectedProfile = collectedProfile;
             conversation.markModified('meta');
             conversation.markModified('meta.collectedProfile');
+        }
+
+        // If conversation status is 'closed', change to 'open' (reopened)
+        if (conversation.status === 'closed') {
+            conversation.status = 'open';
+            conversation.meta.statusChanged = true;
         }
 
         // Recompute next question
@@ -668,7 +659,6 @@ export async function sendMessageWithBusinessLogic(
             logger.info(`Created new customer: ${customer._id}`);
             if (customer) {
                 conversation.customerId = customer._id as any;
-                metadata.customerCreated = true;
             }
         }
 
@@ -676,12 +666,7 @@ export async function sendMessageWithBusinessLogic(
         // If conversation status is 'closed', change to 'open' (reopened)
         if (conversation.status === 'closed') {
             conversation.status = 'open';
-            metadata.statusChanged = true;
-        }
-
-        // If thankYouEmailSent is true, set to false
-        if (conversation.meta.thankYouEmailSent === true) {
-            conversation.meta.thankYouEmailSent = false;
+            conversation.meta.statusChanged = true;
         }
 
         // ========== STEP F: Update Conversation Meta ==========
@@ -689,10 +674,13 @@ export async function sendMessageWithBusinessLogic(
         conversation.markModified('meta');
         conversation.markModified('meta.collectedProfile');
 
+        const emailFromLlm = parseOutput.emailFound ? String(parseOutput.emailFound).trim() : '';
+        const nameFromLlm = parseOutput.nameFound ? String(parseOutput.nameFound).trim() : '';
+
         // ========== STEP G: Email Detection ==========
-        if (qId === 'email' && ans && !conversation.meta.conversationEmailSent) {
+        if (emailFromLlm && !conversation.meta.conversationEmailSent) {
             try {
-                const normalized = normalizeEmail(String(ans));
+                const normalized = normalizeEmail(emailFromLlm);
                 if (isValidEmail(normalized)) {
                     const customer = await Customer.findById(conversation.customerId);
                     if (customer) {
@@ -705,11 +693,25 @@ export async function sendMessageWithBusinessLogic(
                         `${FRONTEND_URL}/chat?conversationId=${conversation._id}`
                     );
                     conversation.meta.conversationEmailSent = true;
-                    metadata.emailSent = true;
+                    metadata.conversationEmailSent = true;
                     logger.info(`Sent conversation link to ${normalized}`);
                 }
             } catch (err: any) {
                 logger.warn('Failed to send conversation link email: ' + String(err));
+            }
+        }
+
+        // ========== STEP G.1: Full Name Detection ==========
+        if (nameFromLlm) {
+            try {
+                const customer = await Customer.findById(conversation.customerId);
+                if (customer) {
+                    customer.fullName = nameFromLlm;
+                    await customer.save();
+                    logger.info(`Updated customer full name: ${customer._id}`);
+                }
+            } catch (err: any) {
+                logger.warn('Failed to update customer full name: ' + String(err));
             }
         }
 
@@ -722,8 +724,9 @@ export async function sendMessageWithBusinessLogic(
         // If no next field, send final confirmation
         if (!nextField || nextQuestionResult.isComplete) {
             // Stop calling LLM - send final confirmation message
-            const organizedProfile = buildProfileTree(collectedProfile);
-            const userName = organizedProfile.full_name?.value || '';
+            const customer = await Customer.findById(conversation.customerId);
+            const userName = customer?.fullName || '';
+            const customerProfile = customer?.profile;
 
             const confirmMsg = createAssistantMessage(
                 `Perfect${userName ? ', ' + userName : ''}! I've collected all your information. Please review the details shown below and click 'Submit' to confirm or 'I want to update my info' if you need to make any changes.`,
@@ -734,14 +737,12 @@ export async function sendMessageWithBusinessLogic(
                     validation: null,
                     updateFields: [],
                     awaitingConfirmation: true,
-                    organizedProfile: organizedProfile,
+                    organizedProfile: customerProfile,
                     completionMessage: nextQuestionResult.completionMessage
                 }
             );
             conversation.messages.push(confirmMsg);
             conversation.messageCount = (conversation.messageCount || 0) + 1;
-            metadata.awaitingConfirmation = true;
-            metadata.organizedProfile = organizedProfile;
             await conversation.save();
             return { conversation, metadata };
         }
@@ -756,10 +757,7 @@ export async function sendMessageWithBusinessLogic(
         };
         const askOutput = await callFormLlm(askInput);
 
-        const askText = askOutput.assistantText ||
-            nextField?.context ||
-            nextField?.placeholder ||
-            'Could you provide this information?';
+        const askText = askOutput.assistantText || 'Could you provide this information?';
 
         const askMsg = createAssistantMessage(
             askText,

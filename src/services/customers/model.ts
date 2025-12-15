@@ -7,6 +7,10 @@ const customerSchema = new Schema<ICustomer>({
         type: String,
         default: null
     },
+    fullName: {
+        type: String,
+        default: null
+    },
     profile: {
         type: Schema.Types.Mixed,
         default: null
