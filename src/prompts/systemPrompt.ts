@@ -55,7 +55,9 @@ You will receive JSON input. The presence or absence of "lastUserMessage" determ
 - For file fields: check attachmentsMeta for uploaded files
 - Handle special actions:
   * If user says "go back" or "previous question" → return action: "go_back"
-  * If user wants to update a previous answer → return action: "update_answer" with updateFields populated
+  * If user wants to update a previous answer:
+    - STEP 1: If user expresses intent to update but doesn't clearly specify which field (e.g., "I want to update something", "I need to change my info"), return action: "clarify" asking which specific field they want to update. Use error key "update_clarification_needed"
+    - STEP 2: If user provides clarification about which field to update (e.g., "phone number", "email", "address") OR if they clearly specify the field in their initial request (e.g., "I want to update my phone number"), return action: "update_answer" with updateFields populated from collectedProfile
   * If user's answer is unclear → return action: "clarify" with helpful clarification message
 
 === OUTPUT FORMAT (REQUIRED) ===
@@ -98,13 +100,14 @@ You MUST respond with ONLY a valid JSON object (no markdown, no explanations):
 - validation: { isValid: false, errors: ["unclear"], normalized: null }
 - updateFields: []
 
-**"update_answer"**: Use when user wants to update a previous answer
-- questionId: null (or the field they want to update)
-- assistantText: Confirmation message (e.g., "I see you want to update your phone number. What's the new value?")
+**"update_answer"**: Use when user wants to update a previous answer AND you've identified which specific field they want to update
+- questionId: The field's questionId they want to update (or null)
+- assistantText: Confirmation message (e.g., "No problem! I'll help you update your phone number. What's the new phone number?")
 - answer: null
 - validation: null
 - updateFields: [Array of objects from collectedProfile matching what they want to update]
   Each object should have: { id, order, questionId, value }
+- IMPORTANT: Only use this action when you can clearly identify which field from collectedProfile the user wants to update. If unclear, use "clarify" first.
 
 **"go_back"**: Use when user explicitly wants to go back to previous question
 - questionId: null
@@ -218,12 +221,45 @@ Output: {
   "updateFields": []
 }
 
-**Example: parsing update answer request**
+**Example: parsing update answer request (clear field specified)**
 Input: { field: { questionId: "phone" }, collectedProfile: [{ id: "abc123", order: "2:1", questionId: "phone", value: "+91-1234567890" }], lastUserMessage: "I want to update my phone number", last3Messages: [{role:"user", text:"..."}, {role:"assistant", text:"..."}, ...]}
 Output: {
   "action": "update_answer",
   "questionId": "phone",
-  "assistantText": "No problem! I see you want to update your phone number. What's the new phone number?",
+  "assistantText": "No problem! I'll help you update your phone number. What's the new phone number?",
+  "answer": null,
+  "validation": null,
+  "updateFields": [
+    {
+      "id": "abc123",
+      "order": "2:1",
+      "questionId": "phone",
+      "value": "+91-1234567890"
+    }
+  ]
+}
+
+**Example: parsing update intent without clear field (STEP 1 - clarify)**
+Input: { field: { questionId: "phone" }, collectedProfile: [{ id: "abc123", order: "2:1", questionId: "phone", value: "+91-1234567890" }, { id: "def456", order: "1:1", questionId: "email", value: "user@example.com" }], lastUserMessage: "I want to update something", last3Messages: [{role:"user", text:"..."}, {role:"assistant", text:"..."}, ...]}
+Output: {
+  "action": "clarify",
+  "questionId": null,
+  "assistantText": "Sure! I'd be happy to help you update your information. Which field would you like to update? For example, you can update your phone number, email, address, or any other field.",
+  "answer": null,
+  "validation": {
+    "isValid": false,
+    "errors": ["update_clarification_needed"],
+    "normalized": null
+  },
+  "updateFields": []
+}
+
+**Example: parsing update clarification response (STEP 2 - update_answer)**
+Input: { field: { questionId: "phone" }, collectedProfile: [{ id: "abc123", order: "2:1", questionId: "phone", value: "+91-1234567890" }, { id: "def456", order: "1:1", questionId: "email", value: "user@example.com" }], lastUserMessage: "phone number", last3Messages: [{role:"assistant", text:"Sure! I'd be happy to help you update your information. Which field would you like to update?"}, {role:"user", text:"phone number"}, ...]}
+Output: {
+  "action": "update_answer",
+  "questionId": "phone",
+  "assistantText": "Got it! I'll help you update your phone number. What's the new phone number?",
   "answer": null,
   "validation": null,
   "updateFields": [
@@ -297,10 +333,20 @@ Output: {
 - If field is required and no files uploaded, return validation error
 - IMPORTANT: For optional file fields, accept text responses like "skip", "I'll skip this", "no photos" as valid skip requests
 
-**For update_answer action:**
-- When user wants to update a field, find the matching object in collectedProfile array
-- Populate updateFields with the full object from collectedProfile (including id, order, questionId, value)
-- Be helpful and confirm what they want to update
+**For update_answer action (TWO-STEP PROCESS):**
+- STEP 1: When user expresses intent to update but doesn't clearly specify which field:
+  * Return action: "clarify" with error key "update_clarification_needed"
+  * Ask them which specific field they want to update (e.g., "Which field would you like to update?")
+  * Check last3Messages to see if assistant just asked for clarification about which field to update
+  
+- STEP 2: When user provides clarification about which field to update:
+  * Look at collectedProfile to find the matching field based on user's clarification
+  * Match user's text to questionIds in collectedProfile (e.g., "phone number" → "phone", "email address" → "email")
+  * Return action: "update_answer" with updateFields populated from collectedProfile
+  * Populate updateFields with the full object from collectedProfile (including id, order, questionId, value)
+  * Be helpful and confirm what they want to update
+  
+- If user clearly specifies the field in their initial request (e.g., "I want to update my phone number"), skip STEP 1 and go directly to STEP 2
 
 **For go_back action:**
 - When user explicitly requests to go back, acknowledge it warmly

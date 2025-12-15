@@ -93,7 +93,8 @@ async function storeCollectedAnswer(
     conversation: IConversation,
     questionId: string,
     answer: any,
-    nextOrder: string | null = null
+    nextOrder: string | null = null,
+    fieldType?: string
 ) {
     if (!conversation.meta) conversation.meta = {};
     if (!conversation.meta.collectedProfile) conversation.meta.collectedProfile = [];
@@ -106,13 +107,41 @@ async function storeCollectedAnswer(
         (item: any) => item && item.questionId === questionId
     );
 
+    // Determine the final value to store
+    let finalValue = answer;
+
+    // For form type fields, merge objects instead of replacing
+    if (existingIndex >= 0 && fieldType === 'form') {
+        const existingValue = conversation.meta.collectedProfile[existingIndex].value;
+
+        // Check if both existing value and new answer are plain objects (not arrays, not null)
+        const isExistingObject = existingValue &&
+            typeof existingValue === 'object' &&
+            !Array.isArray(existingValue) &&
+            existingValue.constructor === Object;
+
+        const isNewAnswerObject = answer &&
+            typeof answer === 'object' &&
+            !Array.isArray(answer) &&
+            answer.constructor === Object;
+
+        // Merge objects if both are plain objects
+        if (isExistingObject && isNewAnswerObject) {
+            finalValue = {
+                ...existingValue,
+                ...answer
+            };
+            logger.info(`Merged form field values for ${questionId}. Existing keys: ${Object.keys(existingValue).join(', ')}, New keys: ${Object.keys(answer).join(', ')}`);
+        }
+    }
+
     const newItem = {
         id: existingIndex >= 0
             ? conversation.meta.collectedProfile[existingIndex].id
             : `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
         order: nextOrder || undefined,
         questionId: questionId,
-        value: answer
+        value: finalValue
     };
 
     if (existingIndex >= 0) {
@@ -125,7 +154,7 @@ async function storeCollectedAnswer(
     conversation.markModified('meta');
     conversation.markModified('meta.collectedProfile');
 
-    logger.info(`Stored answer for ${questionId}: ${JSON.stringify(answer).substring(0, 100)}`);
+    logger.info(`Stored answer for ${questionId}: ${JSON.stringify(finalValue).substring(0, 100)}`);
 }
 
 // ========== Main Functions ==========
@@ -260,7 +289,14 @@ export async function sendMessageWithBusinessLogic(
                 logger.warn('Failed to send thank-you email: ' + String(err));
             }
         }
-
+        if (userMessageText !== null) {
+            const userMessage = createUserMessage(
+                typeof userMessageText === 'string' ? userMessageText : JSON.stringify(userMessageText),
+                attachmentIds
+            );
+            conversation.messages.push(userMessage);
+            conversation.messageCount = (conversation.messageCount || 0) + 1;
+        }
         const confirmMsg = createAssistantMessage(
             `Thank you ${userName}! I've collected all the necessary information. Our team will review your details and reach out within 24 hours with a customized solar solution.`,
             {
@@ -329,6 +365,9 @@ export async function sendMessageWithBusinessLogic(
     // ========== STEP C: Handle Different Actions ==========
 
     // Action: clarify
+    // Note: This handles general clarifications AND the first step of update flow
+    // When user wants to update but doesn't specify which field, LLM returns clarify with error "update_clarification_needed"
+    // On the next turn, when user clarifies which field, LLM will return update_answer action
     if (parseOutput.action === 'clarify') {
         const clarifyMsg = createAssistantMessage(
             parseOutput.assistantText,
@@ -343,11 +382,26 @@ export async function sendMessageWithBusinessLogic(
         );
         conversation.messages.push(clarifyMsg);
         conversation.messageCount = (conversation.messageCount || 0) + 1;
+
+        // If conversation status is 'closed', change to 'open' (reopened)
+        if (conversation.status === 'closed') {
+            conversation.status = 'open';
+            metadata.statusChanged = true;
+        }
+
+        // If thankYouEmailSent is true, set to false
+        if (conversation.meta.thankYouEmailSent === true) {
+            conversation.meta.thankYouEmailSent = false;
+        }
         await conversation.save();
         return { conversation, metadata };
     }
 
     // Action: update_answer
+    // This is the second step of the update flow:
+    // 1. User expresses intent to update → LLM returns clarify (first step)
+    // 2. User clarifies which field → LLM returns update_answer with updateFields populated (this step)
+    // The LLM uses last3Messages context to see the previous clarification and identify the correct field
     if (parseOutput.action === 'update_answer') {
         const updateMsg = createAssistantMessage(
             parseOutput.assistantText,
@@ -548,7 +602,7 @@ export async function sendMessageWithBusinessLogic(
         }
 
         if (qId && ans !== null && ans !== undefined) {
-            await storeCollectedAnswer(conversation, qId, ans, currentNextOrder);
+            await storeCollectedAnswer(conversation, qId, ans, currentNextOrder, currentField?.type);
 
             // Refresh collected profile
             collectedProfile = Array.isArray(conversation.meta.collectedProfile)
@@ -616,6 +670,18 @@ export async function sendMessageWithBusinessLogic(
                 conversation.customerId = customer._id as any;
                 metadata.customerCreated = true;
             }
+        }
+
+
+        // If conversation status is 'closed', change to 'open' (reopened)
+        if (conversation.status === 'closed') {
+            conversation.status = 'open';
+            metadata.statusChanged = true;
+        }
+
+        // If thankYouEmailSent is true, set to false
+        if (conversation.meta.thankYouEmailSent === true) {
+            conversation.meta.thankYouEmailSent = false;
         }
 
         // ========== STEP F: Update Conversation Meta ==========
