@@ -660,10 +660,7 @@ export async function sendMessageWithBusinessLogic(
 
             // Create new customer
             const customer = new Customer({
-                profile: {
-                    ...tree,
-                    leadStage: 'new_prospect'
-                },
+                profile: tree,
                 meta: {
                     firstConversationId: conversationId,
                     createdAt: new Date()
