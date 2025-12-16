@@ -22,6 +22,7 @@ export interface LlmTurnInput {
     mimeType?: string;
     size?: number;
   }[];
+  completionMessage?: any;
   last3Messages?: Array<{
     role: "user" | "assistant" | "system";
     text: string;
@@ -55,6 +56,7 @@ export async function callFormLlm(input: LlmTurnInput): Promise<LlmTurnOutput> {
     collectedProfile: input.collectedProfile,
     lastUserMessage: input.lastUserMessage,
     attachmentsMeta: input.attachmentsMeta || null,
+    completionMessage: input.completionMessage || null,
     last3Messages: input.last3Messages || null,
   };
 
@@ -118,6 +120,7 @@ export async function callFormLlmGemini(
     collectedProfile: input.collectedProfile,
     lastUserMessage: input.lastUserMessage,
     attachmentsMeta: input.attachmentsMeta || null,
+    completionMessage: input.completionMessage || null,
     last3Messages: input.last3Messages || null,
   };
 

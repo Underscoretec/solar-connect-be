@@ -42,10 +42,7 @@ export async function createFormConfig(
           type: params.completionType || formJson.completion?.type || "summary",
         },
       };
-      // Re-stringify if it was originally a string (minify)
-      if (typeof params.formJson === 'string') {
-        formJson = JSON.stringify(formJson);
-      }
+      // Always keep formJson as an object, never stringify
     }
 
     // Check if there's already an active form config
@@ -183,10 +180,7 @@ export async function updateFormConfig(
             : (formJson.completion?.type || "summary"),
         },
       };
-      // Re-stringify if it was originally a string (minify)
-      if (typeof updates.formJson === 'string' || typeof existingConfig.formJson === 'string') {
-        formJson = JSON.stringify(formJson);
-      }
+      // Always keep formJson as an object, never stringify
     }
 
     const updateData: any = {
@@ -247,6 +241,28 @@ export async function toggleFormConfigActive(id: string): Promise<IFormConfig | 
     return formConfig;
   } catch (error: any) {
     logger.error(`Error toggling form config active status: ${error.message}`);
+    throw error;
+  }
+}
+
+/**
+ * Get a specific field from the active FormConfig
+ * @param field - The field to retrieve ('welcomeMessage' or 'formJson')
+ * @returns The value of the requested field from the active FormConfig, or null if not found
+ */
+export async function getActiveFormConfigField(
+  field: 'welcomeMessage' | 'formJson'
+): Promise<string | any | null> {
+  try {
+    const activeFormConfig = await FormConfig.findOne({ isActive: true }).select(field);
+
+    if (!activeFormConfig) {
+      return null;
+    }
+
+    return activeFormConfig[field] || null;
+  } catch (error: any) {
+    logger.error(`Error getting active form config field: ${error.message}`);
     throw error;
   }
 }

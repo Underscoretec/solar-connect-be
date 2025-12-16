@@ -1,4 +1,3 @@
-// src/controllers/conversationsController.ts
 import config from '../../config';
 import logger from '../logger';
 import Conversation from './model';
@@ -10,6 +9,7 @@ import { FORM_JSON2 } from '../../prompts/formJson';
 import { getNextQuestion, removeAnswerWithChildren } from './flowManager';
 import { buildProfileTree } from './buildProfileTree';
 import Customer from '../customers/model';
+import { getActiveFormConfigField } from '../formConfig/controllers';
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 
@@ -180,8 +180,9 @@ export async function createConversation(params: CreateConversationParams): Prom
     await conversation.save();
     logger.info(`Conversation created: ${conversation._id}`);
 
+    const formJson = await getActiveFormConfigField('formJson');
     // Get first question
-    const next = getNextQuestion(FORM_JSON2 as any, []);
+    const next = getNextQuestion(formJson as any, []);
     const nextField = next.nextField || null;
 
     if (!nextField) {
@@ -233,6 +234,8 @@ export async function sendMessageWithBusinessLogic(
 ): Promise<{ conversation: IConversation; metadata: any }> {
     const conversation = await Conversation.findById(conversationId).populate('messages.attachments');
     if (!conversation) throw new Error('Conversation not found');
+
+    const formJson = await getActiveFormConfigField('formJson');
 
     const metadata: any = {};
     const normalizedAttachments = attachments || [];
@@ -296,8 +299,19 @@ export async function sendMessageWithBusinessLogic(
             }
         }
 
+        const completionMessage = await callFormLlm({
+            field: null,
+            collectedProfile: collectedProfile,
+            lastUserMessage: null,
+            attachmentsMeta: [],
+            completionMessage: formJson.completion.message || "generate a completion message for the conversation",
+            last3Messages: getLast3Messages(conversation.messages)
+        });
+
+        const completionText = completionMessage.assistantText;
+
         const confirmMsg = createAssistantMessage(
-            `Thank you ${userName}! I've collected all the necessary information. Our team will review your details and reach out within 24 hours with a customized solar solution.`,
+            completionText,
             {
                 action: 'complete',
                 questionId: null,
@@ -456,7 +470,7 @@ export async function sendMessageWithBusinessLogic(
             }
 
             // Find next question
-            const nextQuestionResult = getNextQuestion(FORM_JSON2 as any, collectedProfile);
+            const nextQuestionResult = getNextQuestion(formJson as any, collectedProfile);
             const nextField = nextQuestionResult.nextField;
 
             if (nextField) {
@@ -523,7 +537,7 @@ export async function sendMessageWithBusinessLogic(
         }
 
         // Recompute next question
-        const nextQuestionResult = getNextQuestion(FORM_JSON2 as any, collectedProfile);
+        const nextQuestionResult = getNextQuestion(formJson as any, collectedProfile);
         const nextField = nextQuestionResult.nextField;
 
         if (nextField) {
@@ -716,7 +730,7 @@ export async function sendMessageWithBusinessLogic(
         }
 
         // ========== STEP H: Ask the Next Question ==========
-        const nextQuestionResult = getNextQuestion(FORM_JSON2 as any, collectedProfile);
+        const nextQuestionResult = getNextQuestion(formJson as any, collectedProfile);
         const nextField = nextQuestionResult.nextField;
 
         logger.info(`Next question: ${nextField?.questionId || 'none'}, isComplete: ${nextQuestionResult.isComplete}`);
@@ -908,3 +922,5 @@ export async function getDashboardStats(): Promise<{
         leadStages
     };
 }
+
+

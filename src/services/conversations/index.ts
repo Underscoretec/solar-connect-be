@@ -2,8 +2,8 @@ import * as express from "express";
 import projection from "../projection";
 import messages from "../messages.json";
 import * as controllers from "./controllers";
-import { WELCOME_MESSAGE } from "../../prompts/welcomeMessage";
 import isValidToken from "../../middleware/isValidToken";
+import { getActiveFormConfigField } from "../formConfig/controllers";
 
 const router = express.Router();
 
@@ -15,9 +15,20 @@ const router = express.Router();
  */
 router.get("/welcome", async (req, res) => {
     try {
+        const welcomeMessage = await getActiveFormConfigField('welcomeMessage');
+        const data = {
+            message: welcomeMessage,
+            type: "choice",
+            options: [
+                {
+                    value: "interested",
+                    label: "Yes, I'm interested"
+                },
+            ]
+        }
         return res.status(200).send(
             projection.successResponse(
-                WELCOME_MESSAGE as any,
+                data as any,
                 200,
                 "WELCOME_FOUND",
                 "Welcome message retrieved"
