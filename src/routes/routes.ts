@@ -4,6 +4,7 @@ import customers from "../services/customers/index";
 import attachments from "../services/attachments/index";
 import auth from "../services/authentication/index";
 import formConfigs from "../services/formConfig/index";
+import communications from "../services/communications/index";
 
 const router = express.Router();
 
@@ -13,6 +14,7 @@ router.use("/conversations", conversations);
 router.use("/customers", customers);
 router.use("/attachments", attachments);
 router.use("/form-configs", formConfigs);
+router.use("/communications", communications);
 
 export default router;
 

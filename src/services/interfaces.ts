@@ -69,6 +69,7 @@ export interface ICustomer extends MongooseDocument {
   fullName?: string;
   profile?: Record<string, any>;
   attachments?: Types.ObjectId[];
+  communications?: Types.ObjectId[];
   meta?: Record<string, any>;
   createdAt?: Date;
   updatedAt?: Date;
@@ -198,6 +199,28 @@ export interface IFormConfig extends MongooseDocument {
   formJson: any;
   createdBy?: string;
   isActive: boolean;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+// ============================================================================
+// Communication Types
+// ============================================================================
+
+export type CommunicationType = 'email' | 'whatsapp' | 'telegram';
+export type CommunicationStatus = 'draft' | 'sent' | 'failed' | 'pending';
+
+export interface ICommunication extends MongooseDocument {
+  _id: Types.ObjectId;
+  customerId: Types.ObjectId;
+  type: CommunicationType;
+  subject?: string;
+  content: string;
+  status: CommunicationStatus;
+  sentBy: Types.ObjectId;
+  sentAt?: Date;
+  metadata?: Record<string, any>;
+  errorMessage?: string;
   createdAt?: Date;
   updatedAt?: Date;
 }

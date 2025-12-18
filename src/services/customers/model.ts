@@ -19,6 +19,10 @@ const customerSchema = new Schema<ICustomer>({
         type: [{ type: Schema.Types.ObjectId, ref: 'attachments' }],
         default: []
     },
+    communications: {
+        type: [{ type: Schema.Types.ObjectId, ref: 'communications' }],
+        default: []
+    },
     meta: {
         type: Schema.Types.Mixed,
         default: null
